@@ -1,0 +1,17 @@
+# Credentials - never commit these
+scripts/config.env
+*.env
+*.key
+*.crt
+*.pem
+credentials*
+
+# Logs
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
