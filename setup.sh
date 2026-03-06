@@ -279,7 +279,7 @@ object ApiUser "icingaweb2" {
 
 object ApiUser "icinga-scripts" {
   password = "$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)"
-  permissions = [ "objects/query/Host", "objects/modify/Host" ]
+  permissions = [ "objects/query/Host", "objects/create/Host", "objects/modify/Host" ]
 }
 APIUSERS
 
