@@ -462,9 +462,32 @@ if [[ -d "${SCRIPT_DIR}/scripts" ]]; then
     if [[ ! -f /opt/icinga-scripts/config.env ]] && [[ -f /opt/icinga-scripts/config.env.example ]]; then
         cp /opt/icinga-scripts/config.env.example /opt/icinga-scripts/config.env
     fi
+    # Merge any new variables from config.env.example that are missing in config.env
+    if [[ -f /opt/icinga-scripts/config.env ]] && [[ -f /opt/icinga-scripts/config.env.example ]]; then
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[A-Z_]+= ]] || continue
+            varname="${line%%=*}"
+            if ! grep -q "^${varname}=" /opt/icinga-scripts/config.env 2>/dev/null; then
+                log "Adding missing variable ${varname} to config.env"
+                echo "$line" >> /opt/icinga-scripts/config.env
+            fi
+        done < /opt/icinga-scripts/config.env.example
+    fi
     # Bootstrap secrets.env from example if not present (secrets.env is gitignored)
     if [[ ! -f /opt/icinga-scripts/secrets.env ]] && [[ -f /opt/icinga-scripts/secrets.env.example ]]; then
         cp /opt/icinga-scripts/secrets.env.example /opt/icinga-scripts/secrets.env
+    fi
+    # Merge any new variables from secrets.env.example that are missing in secrets.env
+    if [[ -f /opt/icinga-scripts/secrets.env ]] && [[ -f /opt/icinga-scripts/secrets.env.example ]]; then
+        while IFS= read -r line; do
+            # Only process VAR= lines (skip comments and blanks)
+            [[ "$line" =~ ^[A-Z_]+=  ]] || continue
+            varname="${line%%=*}"
+            if ! grep -q "^${varname}=" /opt/icinga-scripts/secrets.env 2>/dev/null; then
+                log "Adding missing variable ${varname} to secrets.env"
+                echo "$line" >> /opt/icinga-scripts/secrets.env
+            fi
+        done < /opt/icinga-scripts/secrets.env.example
     fi
     # Always patch Icinga2 API password into secrets.env (regenerated on every setup run)
     if [[ -f /opt/icinga-scripts/secrets.env ]] && [[ -f /etc/icinga2/conf.d/api-users.conf ]]; then
