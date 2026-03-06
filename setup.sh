@@ -279,7 +279,9 @@ retention:
   sla-days: 730
 ICINGADB
 
-svc enable --now icingadb
+# IcingaDB is configured but NOT started yet — it must start after Icinga2
+# has written its initial state to Redis (icinga:stats key), otherwise IcingaDB
+# crashes with "Undefined array key 'icinga:stats'" and the sync never happens.
 
 # ── 8. Icinga2 ────────────────────────────────────────────────────────────────
 log "Configuring Icinga2..."
@@ -304,7 +306,7 @@ ICINGA2CONF
 log "Setting up Icinga2 API..."
 icinga2 api setup 2>&1 | tee -a "$LOG_FILE"
 
-# Add icingaweb2 API user
+# Add API users
 cat > /etc/icinga2/conf.d/api-users.conf <<APIUSERS
 /**
  * API users
@@ -321,7 +323,7 @@ object ApiUser "icingaweb2" {
 
 object ApiUser "icinga-scripts" {
   password = "$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)"
-  permissions = [ "objects/query/Host", "objects/create/Host", "objects/modify/Host" ]
+  permissions = [ "objects/query/Host", "objects/create/Host", "objects/modify/Host", "objects/delete/Host", "actions/process-check-result" ]
 }
 APIUSERS
 
@@ -340,7 +342,32 @@ if [[ -d "${SCRIPT_DIR}/icinga2/conf.d" ]]; then
 fi
 
 svc enable icinga2
+
+# Validate config before restarting so failures surface immediately
+log "Validating Icinga2 configuration..."
+icinga2 daemon -C 2>&1 | tee -a "$LOG_FILE" || die "Icinga2 config validation failed — see /var/log/icinga2/startup.log"
+
 svc restart icinga2
+
+# Wait for Icinga2 to write its initial state to Redis before starting IcingaDB.
+# Without this, IcingaDB crashes immediately with "Undefined array key 'icinga:stats'"
+# because the key doesn't exist yet, and the sync never recovers.
+log "Waiting for Icinga2 to write state to Redis (icinga:stats)..."
+_redis_ready=false
+for _ in $(seq 1 60); do
+    if redis-cli EXISTS icinga:stats 2>/dev/null | grep -q '^1$'; then
+        log "Icinga2 Redis state ready."
+        _redis_ready=true
+        break
+    fi
+    sleep 2
+done
+if ! $_redis_ready; then
+    log "Warning: Icinga2 did not write to Redis within 120s — IcingaDB may not sync correctly."
+    log "Check: sudo cat /var/log/icinga2/startup.log"
+fi
+
+svc enable --now icingadb
 
 # ── 9. IcingaWeb2 ─────────────────────────────────────────────────────────────
 log "Configuring IcingaWeb2..."
@@ -546,19 +573,11 @@ if [[ -d "${SCRIPT_DIR}/scripts" ]]; then
     chmod 640 /opt/icinga-scripts/secrets.env 2>/dev/null || true
     chmod 640 /opt/icinga-scripts/config.env 2>/dev/null || true
 
-    # Run initial host import from QuestDB (skip if QuestDB not configured)
-    QHOST=$(grep '^QUESTDB_HOST=' /opt/icinga-scripts/config.env 2>/dev/null | cut -d= -f2 | tr -d '"')
-    if [[ -n "$QHOST" && "$QHOST" != "localhost" ]]; then
-        log "Running initial host import from QuestDB (${QHOST})..."
-        bash /opt/icinga-scripts/import-hosts-questdb.sh || log "Warning: host import failed — check QuestDB connectivity"
-        echo ""
-        echo "┌─────────────────────────────────────────────┐"
-        echo "│  LOGIN:  admin / ${ICINGAWEB_ADMIN_PASS}"
-        echo "└─────────────────────────────────────────────┘"
-        echo ""
-    else
-        log "Skipping host import: QUESTDB_HOST not configured in /opt/icinga-scripts/config.env"
-    fi
+    echo ""
+    echo "┌─────────────────────────────────────────────┐"
+    echo "│  LOGIN:  admin / ${ICINGAWEB_ADMIN_PASS}"   │
+    echo "└─────────────────────────────────────────────┘"
+    echo ""
 fi
 
 # ── 12. HaloITSM notifications (optional) ────────────────────────────────────
@@ -638,6 +657,14 @@ if [[ "${ENABLE_PASSIVE_CHECKS,,}" =~ ^(yes|true|1)$ ]]; then
 CRONEOF
         chmod 644 "$CRON_FILE"
         log "Cron job installed: $CRON_FILE"
+
+        IMPORT_CRON_FILE="/etc/cron.d/icinga-import-hosts"
+        cat > "$IMPORT_CRON_FILE" <<CRONEOF
+# Import hosts from QuestDB into Icinga2 every 8 hours
+0 */8 * * * root /opt/icinga-scripts/import-hosts-questdb.sh >> /var/log/icinga-import-hosts.log 2>&1
+CRONEOF
+        chmod 644 "$IMPORT_CRON_FILE"
+        log "Host import cron job installed: $IMPORT_CRON_FILE"
     else
         log "Warning: $BSP_SRC not found — skipping passive checks"
     fi
@@ -667,14 +694,14 @@ log "Setup complete!"
 cat <<SUMMARY
 
 ╔═══════════════════════════════════════════════╗
-║        Icinga2 Monolith - Setup Complete       ║
+║        Icinga2 Monolith - Setup Complete      ║
 ╚═══════════════════════════════════════════════╝
 
   Web UI:   http://${IP}/icingaweb2
             http://${HOSTNAME}/icingaweb2
 
 ┌─────────────────────────────────────────────┐
-│  LOGIN:  admin / ${ICINGAWEB_ADMIN_PASS}
+│  LOGIN:  admin / ${ICINGAWEB_ADMIN_PASS}    │
 └─────────────────────────────────────────────┘
 
   Credentials saved to: /etc/icinga-setup/credentials.env
@@ -689,3 +716,12 @@ cat <<SUMMARY
 
 ═══════════════════════════════════════════════
 SUMMARY
+
+# Run initial host import in the background (requires VPN/QuestDB connectivity)
+QHOST=$(grep '^QUESTDB_HOST=' /opt/icinga-scripts/config.env 2>/dev/null | cut -d= -f2 | tr -d '"')
+if [[ -f /opt/icinga-scripts/import-hosts-questdb.sh && -n "$QHOST" && "$QHOST" != "localhost" ]]; then
+    log "Running initial host import in background (log: /var/log/icinga-import-hosts.log)..."
+    nohup /opt/icinga-scripts/import-hosts-questdb.sh >> /var/log/icinga-import-hosts.log 2>&1 &
+else
+    log "Skipping initial host import: QUESTDB_HOST not configured or script not found"
+fi

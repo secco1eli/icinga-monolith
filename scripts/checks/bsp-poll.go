@@ -140,6 +140,27 @@ func getenvFloat(key string, def float64) float64 {
 	return f
 }
 
+// formatAge returns a human-readable duration string for a number of seconds.
+func formatAge(seconds int64) string {
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	if seconds < 3600 {
+		m := seconds / 60
+		s := seconds % 60
+		if s == 0 {
+			return fmt.Sprintf("%dm", m)
+		}
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	h := seconds / 3600
+	m := (seconds % 3600) / 60
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh %dm", h, m)
+}
+
 func getenvBool(key string, def bool) bool {
 	v := strings.ToLower(os.Getenv(key))
 	if v == "" {
@@ -440,10 +461,10 @@ func postResult(host, service string, exitStatus int, output string, ts int64, d
 		"plugin_output": output,
 		"timestamp":     ts,
 	}
-	// also append ts to plugin output
+	// append age as numeric performance data (graphable by Icinga)
 	if ts != 0 {
-		humanTs := time.Unix(ts, 0).Format(time.RFC3339)
-		payload["plugin_output"] = fmt.Sprintf("%s | ts=%s", output, humanTs)
+		age := time.Now().Unix() - ts
+		payload["plugin_output"] = fmt.Sprintf("%s | age=%ds", output, age)
 	}
 
 	b, _ := json.Marshal(payload)
@@ -707,13 +728,14 @@ func runMetricOnce(metric Metric, dryRun bool) (bool, error) {
 			} else if now-ts > threshold {
 				// stale timestamp is CRITICAL for timestamp metrics
 				status = 2
-				humanTs := time.Unix(ts, 0).Format(time.RFC3339)
-				output = fmt.Sprintf("CRITICAL: stale timestamp (%s)", humanTs)
+				age := now - ts
+				humanTs := time.Unix(ts, 0).Local().Format("2006-01-02 15:04:05 MST")
+				output = fmt.Sprintf("CRITICAL: last poll %s ago (%s)", formatAge(age), humanTs)
 			} else {
 				status = 0
-				humanTs := time.Unix(ts, 0).Format(time.RFC3339)
 				age := now - ts
-				output = fmt.Sprintf("OK: timestamp recent (%s), age=%ds", humanTs, age)
+				humanTs := time.Unix(ts, 0).Local().Format("2006-01-02 15:04:05 MST")
+				output = fmt.Sprintf("OK: last poll %s ago (%s)", formatAge(age), humanTs)
 			}
 			key := fmt.Sprintf("%s:%s", metric.Name, host)
 			// determine service name for passive posting: metric.PassiveService -> metric.Service -> global default

@@ -19,6 +19,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 
+# Submit CRITICAL to Icinga2 if the script exits unexpectedly (QuestDB unreachable, etc.)
+_on_error() {
+    local exit_code=$?
+    local line=$1
+    if [[ "${DRY_RUN:-false}" == "false" ]]; then
+        local master_host
+        master_host="$(hostname -f 2>/dev/null || hostname)"
+        submit_passive_check "${master_host}" "QuestDB Host Import" 2 \
+            "CRITICAL: host import script failed at line ${line} (exit ${exit_code})" || true
+    fi
+}
+trap '_on_error $LINENO' ERR
+
 DRY_RUN=false
 CUSTOM_QUERY=""
 
@@ -141,3 +154,10 @@ for row in d['dataset']:
 ")
 
 log "Done. Created=${CREATED} Updated=${UPDATED} Failed=${FAILED}"
+
+# Submit passive check result to Icinga2 (service on the master host)
+if [[ "${DRY_RUN}" == "false" ]]; then
+    MASTER_HOST="$(hostname -f 2>/dev/null || hostname)"
+    submit_passive_check "${MASTER_HOST}" "QuestDB Host Import" 0 \
+        "OK: host import completed — Created=${CREATED} Updated=${UPDATED} Failed=${FAILED}" || true
+fi

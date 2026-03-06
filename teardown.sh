@@ -19,7 +19,7 @@ echo "    - Packages: icinga2, icingadb, icingaweb2, mariadb, redis, apache2"
 echo "    - Databases: icingadb, icingaweb2"
 echo "    - Config dirs: /etc/icinga2, /etc/icingadb, /etc/icingaweb2, /etc/icinga-setup"
 echo "    - Data dirs: /var/lib/icinga2, /var/lib/redis"
-echo "    - Cron jobs: /etc/cron.d/icinga-bsp-poll"
+echo "    - Cron jobs: /etc/cron.d/icinga-bsp-poll, /etc/cron.d/icinga-import-hosts"
 echo "    - Scripts: /opt/icinga-scripts (config.env and secrets.env always preserved)"
 echo ""
 read -r -p "  Type 'yes' to confirm: " CONFIRM
@@ -34,7 +34,11 @@ for svc in icinga2 icingadb redis-server apache2 mariadb; do
     service "$svc" stop 2>/dev/null || true
 done
 
-# ── 2. Remove packages ────────────────────────────────────────────────────────
+# ── 2. Drop databases (must happen before MariaDB is purged) ──────────────────
+log "Dropping databases..."
+mysql -e "DROP DATABASE IF EXISTS icingadb; DROP DATABASE IF EXISTS icingaweb2;" 2>/dev/null || true
+
+# ── 3. Remove packages ────────────────────────────────────────────────────────
 log "Purging packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get purge -y \
@@ -45,10 +49,6 @@ apt-get purge -y \
     php-mysql php-curl php-xml php-gd php-mbstring php-intl php-zip php-imagick \
     2>/dev/null || true
 apt-get autoremove -y 2>/dev/null || true
-
-# ── 3. Drop databases ─────────────────────────────────────────────────────────
-log "Dropping databases..."
-mysql -e "DROP DATABASE IF EXISTS icingadb; DROP DATABASE IF EXISTS icingaweb2;" 2>/dev/null || true
 
 # ── 4. Remove config and data dirs ───────────────────────────────────────────
 log "Removing config and data directories..."
@@ -77,7 +77,9 @@ fi
 # ── 6. Remove cron jobs and logs ──────────────────────────────────────────────
 log "Removing cron jobs and logs..."
 rm -f /etc/cron.d/icinga-bsp-poll
+rm -f /etc/cron.d/icinga-import-hosts
 rm -f /var/log/bsp-poll.log
+rm -f /var/log/icinga-import-hosts.log
 
 # ── 7. Remove Go ──────────────────────────────────────────────────────────────
 log "Removing Go..."
