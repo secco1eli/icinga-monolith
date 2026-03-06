@@ -548,7 +548,7 @@ else
 fi
 
 # ── 12. Go ────────────────────────────────────────────────────────────────────
-GO_VERSION="${GO_VERSION:-1.22.5}"
+GO_VERSION="${GO_VERSION:-1.23.4}"
 log "Installing Go ${GO_VERSION}..."
 ARCH="$(dpkg --print-architecture)"
 case "$ARCH" in
