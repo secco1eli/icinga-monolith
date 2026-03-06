@@ -4,6 +4,8 @@ Infrastructure-as-code for a single-server Icinga2 monitoring stack. The setup s
 
 Runs on Ubuntu 20.04 / 22.04 / 24.04 (bare metal, VM, or WSL2).
 
+See [docs/architecture.md](docs/architecture.md) for the QuestDB → Icinga2 data pipeline and passive check design.
+
 ## Stack
 
 | Component    | Role                        |
