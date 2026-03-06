@@ -564,33 +564,31 @@ svc restart redis-server icingadb icinga2 apache2
 HOSTNAME="$(hostname -f 2>/dev/null || hostname)"
 IP="$(hostname -I | awk '{print $1}')"
 
+_svc_status() { service "$1" status &>/dev/null && echo "running" || echo "stopped"; }
+
 log "Setup complete!"
 cat <<SUMMARY
 
-═══════════════════════════════════════════════
-  Icinga2 Monolith - Setup Complete
-═══════════════════════════════════════════════
+╔═══════════════════════════════════════════════╗
+║        Icinga2 Monolith - Setup Complete       ║
+╚═══════════════════════════════════════════════╝
 
-  Web UI:      http://${IP}/icingaweb2
-               http://${HOSTNAME}/icingaweb2
+  Web UI:   http://${IP}/icingaweb2
+            http://${HOSTNAME}/icingaweb2
 
-  Login:       admin / ${ICINGAWEB_ADMIN_PASS}
+┌─────────────────────────────────────────────┐
+│  LOGIN:  admin / ${ICINGAWEB_ADMIN_PASS}
+└─────────────────────────────────────────────┘
 
-  All credentials saved to:
-               /etc/icinga-setup/credentials.env
-
-  NOTE: If using QuestDB host import, ensure
-  QUESTDB_USER and QUESTDB_PASS are set in:
-               /opt/icinga-scripts/secrets.env
-
-  Go:          $(/usr/local/go/bin/go version 2>/dev/null | awk '{print $3}')
+  Credentials saved to: /etc/icinga-setup/credentials.env
+  Go: $(/usr/local/go/bin/go version 2>/dev/null | awk '{print $3}')
 
   Services:
-    icinga2     $(systemctl is-active icinga2)
-    icingadb    $(systemctl is-active icingadb)
-    redis       $(systemctl is-active redis-server)
-    mariadb     $(systemctl is-active mariadb)
-    apache2     $(systemctl is-active apache2)
+    icinga2     $(_svc_status icinga2)
+    icingadb    $(_svc_status icingadb)
+    redis       $(_svc_status redis-server)
+    mariadb     $(_svc_status mariadb)
+    apache2     $(_svc_status apache2)
 
 ═══════════════════════════════════════════════
 SUMMARY
