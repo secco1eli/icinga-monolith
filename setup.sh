@@ -620,7 +620,15 @@ svc restart redis-server icingadb icinga2 apache2
 HOSTNAME="$(hostname -f 2>/dev/null || hostname)"
 IP="$(hostname -I | awk '{print $1}')"
 
-_svc_status() { service "$1" status &>/dev/null && echo "running" || echo "stopped"; }
+_svc_status() {
+    if service "$1" status &>/dev/null; then
+        echo "running"
+    elif pgrep -x "$1" &>/dev/null; then
+        echo "running (no init script)"
+    else
+        echo "stopped"
+    fi
+}
 
 log "Setup complete!"
 cat <<SUMMARY
