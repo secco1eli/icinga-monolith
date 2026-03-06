@@ -12,14 +12,13 @@ See [docs/architecture.md](docs/architecture.md) for the full data pipeline and 
 flowchart TD
     QDB[(QuestDB\ntime-series data)]
 
-    QDB -->|"SELECT DISTINCT host FROM cpu\n(setup / manual)"| IMP[import-hosts-questdb.sh]
-    QDB -->|"SELECT host, timestamp FROM bsp\n(cron every 2 min)"| BSP[bsp-poll]
+    QDB -->|"Host discovery\n(setup / on-demand)"| IMP[Import script\nCreates host objects]
+    QDB -->|"Metric queries\n(scheduled)"| CHK[Passive check scripts\nSubmit check results]
 
-    IMP -->|"PUT /v1/objects/hosts\nCreate linux-player hosts"| API
+    IMP -->|"PUT /v1/objects/hosts"| API
+    CHK -->|"POST /v1/actions/process-check-result"| API
 
-    BSP -->|"POST /v1/actions/process-check-result\nOK / CRITICAL / UNKNOWN per host"| API
-
-    API[Icinga2 API :5665]
+    API[Icinga2 API]
     API --> IC[Icinga2 Engine]
 
     IC --> RD[(Redis)]
@@ -27,7 +26,7 @@ flowchart TD
     IDB --> DB[(MariaDB)]
     DB --> WEB[IcingaWeb2\nhttps://server/icingaweb2]
 
-    IC -->|"State change alerts"| HAL[HaloITSM\nnotifications]
+    IC -->|"Alerts on state change"| HAL[Notification handlers\ne.g. HaloITSM]
 ```
 
 ## Stack
