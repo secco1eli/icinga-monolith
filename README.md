@@ -156,4 +156,3 @@ curl -sSk -u root:<pass> https://localhost:5665/v1/status
 ## Re-deploying
 
 The script is idempotent for package installation. For a fresh re-deploy on a clean machine, just run `setup.sh` again. On an existing machine with data, re-running will reset passwords — back up `/etc/icinga-setup/credentials.env` first.
-# icinga-monolith
