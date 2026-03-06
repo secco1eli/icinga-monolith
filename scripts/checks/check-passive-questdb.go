@@ -1,3 +1,5 @@
+//go:build ignore
+
 // check-passive-questdb.go
 // TODO: Query QuestDB for check results and submit them as passive checks to Icinga2.
 //

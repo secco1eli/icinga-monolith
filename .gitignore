@@ -1,5 +1,6 @@
 # Credentials - never commit these
 scripts/config.env
+icinga2/conf.d/api-users.conf
 *.env
 *.key
 *.crt

@@ -54,6 +54,7 @@ type Metric struct {
 type StateEntry struct {
 	Status    int   `json:"status"`
 	Timestamp int64 `json:"ts"`
+	PostedAt  int64 `json:"posted_at,omitempty"`
 }
 
 var (
@@ -82,6 +83,12 @@ var (
 
 	// age in seconds after which a datapoint is considered stale
 	STALE_THRESHOLD_SECONDS = int64(getenvInt("STALE_THRESHOLD_SECONDS", 15*60)) // 15 minutes
+
+	// how often to force re-post all hosts regardless of status change (0 = never force)
+	RESYNC_INTERVAL_SECONDS = int64(getenvInt("RESYNC_INTERVAL_SECONDS", 6*3600)) // 6 hours
+
+	// path to per-host threshold overrides config file
+	THRESHOLDS_FILE = getenv("THRESHOLDS_FILE", "/opt/icinga-scripts/bsp-poll-thresholds.conf")
 
 	// metrics: single bsp timestamp metric by default
 	METRICS = []Metric{
@@ -139,6 +146,59 @@ func getenvBool(key string, def bool) bool {
 		return def
 	}
 	return v == "1" || v == "true" || v == "yes"
+}
+
+// thresholdRule maps a host glob pattern to a stale threshold in seconds.
+type thresholdRule struct {
+	Pattern string
+	Seconds int64
+}
+
+// loadHostThresholds reads per-host stale threshold rules from the config file.
+// Format: hostname_or_glob = minutes  (one per line, # for comments)
+// First match wins — put specific patterns before broad wildcards.
+func loadHostThresholds(path string) []thresholdRule {
+	var rules []thresholdRule
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Printf("Warning: cannot read thresholds file %s: %v", path, err)
+		}
+		return rules
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		pattern := strings.TrimSpace(parts[0])
+		valStr := strings.TrimSpace(parts[1])
+		minutes, err := strconv.ParseInt(valStr, 10, 64)
+		if err != nil {
+			logger.Printf("Warning: bad threshold for pattern %q: %v", pattern, err)
+			continue
+		}
+		rules = append(rules, thresholdRule{Pattern: pattern, Seconds: minutes * 60})
+	}
+	if len(rules) > 0 {
+		logger.Printf("Loaded %d threshold rules from %s", len(rules), path)
+	}
+	return rules
+}
+
+// hostThreshold returns the stale threshold in seconds for host.
+// Uses the first matching rule from rules; falls back to STALE_THRESHOLD_SECONDS.
+func hostThreshold(host string, rules []thresholdRule) int64 {
+	for _, r := range rules {
+		if matched, err := filepath.Match(r.Pattern, host); err == nil && matched {
+			return r.Seconds
+		}
+	}
+	return STALE_THRESHOLD_SECONDS
 }
 
 func initHTTPClient() {
@@ -347,7 +407,9 @@ func icingaHealth() bool {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == 200
+	// Any HTTP response means the API is up; only network errors or 5xx indicate a real outage.
+	// A 401/403 means the API is responding but this user lacks status/query permission — still healthy.
+	return resp.StatusCode < 500
 }
 
 func postResult(host, service string, exitStatus int, output string, ts int64, dryRun bool) bool {
@@ -574,6 +636,8 @@ func extractTimestamp(val interface{}) (int64, bool) {
 // runMetricOnce posts all hosts on the metric's first run, posts missing hosts present in Icinga,
 // and marks datapoints older than STALE_THRESHOLD_SECONDS as UNKNOWN or CRITICAL depending on metric type.
 func runMetricOnce(metric Metric, dryRun bool) (bool, error) {
+	threshRules := loadHostThresholds(THRESHOLDS_FILE)
+
 	statePath := _statePathForMetric(metric)
 	prevState, _ := loadState(statePath)
 
@@ -634,12 +698,13 @@ func runMetricOnce(metric Metric, dryRun bool) (bool, error) {
 				}
 			}
 			now := time.Now().Unix()
+			threshold := hostThreshold(host, threshRules)
 			status := 3
 			output := ""
 			if ts == 0 {
 				status = 3
 				output = "UNKNOWN: no timestamp value"
-			} else if now-ts > STALE_THRESHOLD_SECONDS {
+			} else if now-ts > threshold {
 				// stale timestamp is CRITICAL for timestamp metrics
 				status = 2
 				humanTs := time.Unix(ts, 0).Format(time.RFC3339)
@@ -664,7 +729,8 @@ func runMetricOnce(metric Metric, dryRun bool) (bool, error) {
 				tasks = append(tasks, task{host: host, svc: svc, status: status, output: output, key: key, ts: ts})
 			} else {
 				prev, ok := prevState[key]
-				if !ok || prev.Status != status {
+				stale := RESYNC_INTERVAL_SECONDS > 0 && (prev.PostedAt == 0 || now-prev.PostedAt > RESYNC_INTERVAL_SECONDS)
+				if !ok || prev.Status != status || stale {
 					tasks = append(tasks, task{host: host, svc: svc, status: status, output: output, key: key, ts: ts})
 				}
 			}
@@ -689,7 +755,7 @@ func runMetricOnce(metric Metric, dryRun bool) (bool, error) {
 
 		// If datapoint is stale, override status and output (legacy behavior: UNKNOWN)
 		now := time.Now().Unix()
-		if ts != 0 && now-ts > STALE_THRESHOLD_SECONDS {
+		if ts != 0 && now-ts > hostThreshold(host, threshRules) {
 			status = 3
 			humanTs := time.Unix(ts, 0).Format(time.RFC3339)
 			out = fmt.Sprintf("UNKNOWN: stale datapoint (%s) - %s", humanTs, out)
@@ -710,7 +776,8 @@ func runMetricOnce(metric Metric, dryRun bool) (bool, error) {
 			tasks = append(tasks, task{host: host, svc: svc, status: status, output: out, key: key, ts: ts})
 		} else {
 			prev, ok := prevState[key]
-			if !ok || prev.Status != status {
+			stale := RESYNC_INTERVAL_SECONDS > 0 && (prev.PostedAt == 0 || now-prev.PostedAt > RESYNC_INTERVAL_SECONDS)
+			if !ok || prev.Status != status || stale {
 				tasks = append(tasks, task{host: host, svc: svc, status: status, output: out, key: key, ts: ts})
 			}
 		}
@@ -825,9 +892,10 @@ func runMetricOnce(metric Metric, dryRun bool) (bool, error) {
 	}()
 
 	// collect results and update prevState in this goroutine only
+	now := time.Now().Unix()
 	for res := range resultsCh {
 		if res.ok {
-			prevState[res.key] = StateEntry{Status: res.status, Timestamp: res.ts}
+			prevState[res.key] = StateEntry{Status: res.status, Timestamp: res.ts, PostedAt: now}
 		}
 	}
 

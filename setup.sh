@@ -36,7 +36,19 @@ svc() {
     for name in "${clean_services[@]}"; do
         case "$action" in
             enable)
-                $do_start && service "$name" start || true ;;
+                if $do_start; then
+                    if ! service "$name" start 2>/dev/null; then
+                        EXEC="$(grep '^ExecStart=' "/lib/systemd/system/${name}.service" 2>/dev/null | sed 's/ExecStart=//' | awk '{print $1}')"
+                        if [[ -n "$EXEC" && -x "$EXEC" ]]; then
+                            pkill -f "$EXEC" 2>/dev/null || true
+                            sleep 1
+                            nohup "$EXEC" >> "/var/log/${name}.log" 2>&1 &
+                            log "Started ${name} directly (no init script): $EXEC"
+                        else
+                            log "Warning: could not start ${name} — no init script or binary found"
+                        fi
+                    fi
+                fi ;;
             start) service "$name" start ;;
             restart)
                 if ! service "$name" restart 2>/dev/null; then
@@ -100,9 +112,29 @@ EOF
 chmod 600 /etc/icinga-setup/credentials.env
 log "Credentials saved to /etc/icinga-setup/credentials.env"
 
-# ── 1. System prerequisites ───────────────────────────────────────────────────
-log "Installing prerequisites..."
+# ── 1. Clean up broken dpkg state from any previous failed run ────────────────
+# Any icinga2/icingadb packages left in half-configured or unpacked state will be
+# configured by the next apt-get call (via dpkg --configure -a), causing it to
+# fail before we ever reach the main install. Force-purge them first.
 export DEBIAN_FRONTEND=noninteractive
+dpkg --purge --force-all \
+    icinga2 icinga2-bin icinga2-common icingadb icingadb-web icingaweb2 \
+    2>/dev/null || true
+
+# On WSL2 there is no init system, so invoke-rc.d cannot determine the runlevel
+# and dpkg postinst scripts fail when they try to start/restart services.
+# Replace invoke-rc.d with a no-op (exit 0) so postinst scripts succeed, then
+# restore the real invoke-rc.d afterwards.
+if $IS_WSL; then
+    if [[ ! -f /usr/sbin/invoke-rc.d.pre-icinga-setup ]]; then
+        cp /usr/sbin/invoke-rc.d /usr/sbin/invoke-rc.d.pre-icinga-setup
+    fi
+    printf '#!/bin/sh\nexit 0\n' > /usr/sbin/invoke-rc.d
+    chmod +x /usr/sbin/invoke-rc.d
+fi
+
+# ── 2. System prerequisites ───────────────────────────────────────────────────
+log "Installing prerequisites..."
 apt-get update -qq
 apt-get install -y -qq \
     apt-transport-https \
@@ -112,7 +144,7 @@ apt-get install -y -qq \
     lsb-release \
     software-properties-common
 
-# ── 2. Repositories ───────────────────────────────────────────────────────────
+# ── 3. Repositories ───────────────────────────────────────────────────────────
 log "Adding Icinga repository..."
 curl -sSL https://packages.icinga.com/icinga.key | gpg --dearmor --yes -o /usr/share/keyrings/icinga-keyring.gpg
 
@@ -133,15 +165,14 @@ curl -sSL https://r.mariadb.com/downloads/mariadb_repo_setup | bash -s -- --mari
 
 apt-get update -qq
 
-# ── 3. Package installation ───────────────────────────────────────────────────
-# Block service auto-start during apt install (needed on WSL2 where invoke-rc.d
-# cannot determine runlevel and causes dpkg postinst failures).
-echo '#!/bin/sh
-exit 101' > /usr/sbin/policy-rc.d
-chmod +x /usr/sbin/policy-rc.d
+# ── 4. Package installation ───────────────────────────────────────────────────
 
 log "Installing Icinga2, IcingaDB, IcingaWeb2, MariaDB, Redis, Apache2..."
+export DEBIAN_FRONTEND=noninteractive
 apt-get install -y -qq \
+    -o Dpkg::Options::="--force-confnew" \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confmiss" \
     icinga2 \
     icingadb \
     icingadb-web \
@@ -159,10 +190,12 @@ apt-get install -y -qq \
     php-zip \
     php-imagick
 
-# Restore normal service behaviour after install
-rm -f /usr/sbin/policy-rc.d
+# Restore invoke-rc.d after install
+if $IS_WSL && [[ -f /usr/sbin/invoke-rc.d.pre-icinga-setup ]]; then
+    mv /usr/sbin/invoke-rc.d.pre-icinga-setup /usr/sbin/invoke-rc.d
+fi
 
-# ── 4. MariaDB setup ──────────────────────────────────────────────────────────
+# ── 5. MariaDB setup ──────────────────────────────────────────────────────────
 log "Configuring MariaDB..."
 svc enable --now mariadb
 
@@ -216,14 +249,14 @@ else
     log "IcingaWeb2 schema already imported, skipping."
 fi
 
-# ── 5. Redis ──────────────────────────────────────────────────────────────────
+# ── 6. Redis ──────────────────────────────────────────────────────────────────
 log "Configuring Redis..."
 svc enable --now redis-server
 # Bind only to localhost
 sed -i 's/^# bind 127.0.0.1/bind 127.0.0.1/' /etc/redis/redis.conf || true
 svc restart redis-server
 
-# ── 6. IcingaDB ───────────────────────────────────────────────────────────────
+# ── 7. IcingaDB ───────────────────────────────────────────────────────────────
 log "Configuring IcingaDB..."
 cat > /etc/icingadb/config.yml <<ICINGADB
 database:
@@ -248,7 +281,7 @@ ICINGADB
 
 svc enable --now icingadb
 
-# ── 7. Icinga2 ────────────────────────────────────────────────────────────────
+# ── 8. Icinga2 ────────────────────────────────────────────────────────────────
 log "Configuring Icinga2..."
 # Enable features
 icinga2 feature enable icingadb
@@ -309,7 +342,7 @@ fi
 svc enable icinga2
 svc restart icinga2
 
-# ── 8. IcingaWeb2 ─────────────────────────────────────────────────────────────
+# ── 9. IcingaWeb2 ─────────────────────────────────────────────────────────────
 log "Configuring IcingaWeb2..."
 mkdir -p /etc/icingaweb2/{modules,enabledModules}
 
@@ -412,7 +445,7 @@ VALUES ('admin', 1, '${ADMIN_HASH}')
 ON DUPLICATE KEY UPDATE password_hash='${ADMIN_HASH}', active=1;
 SQL
 
-# ── 9. Apache2 ────────────────────────────────────────────────────────────────
+# ── 10. Apache2 ───────────────────────────────────────────────────────────────
 log "Configuring Apache2..."
 # Disable all PHP modules first to avoid conflicts (multiple PHP versions cause segfault)
 PHP_MOD="$(php -r 'echo "php" . PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null || echo "php8.3")"
@@ -455,7 +488,7 @@ a2enconf icingaweb2
 svc enable apache2
 svc restart apache2
 
-# ── 10. Copy custom config ────────────────────────────────────────────────────
+# ── 11. Copy custom config ────────────────────────────────────────────────────
 if [[ -d "${SCRIPT_DIR}/icingaweb2" ]]; then
     log "Copying custom IcingaWeb2 configuration..."
     cp -r "${SCRIPT_DIR}/icingaweb2/"* /etc/icingaweb2/
@@ -528,7 +561,7 @@ if [[ -d "${SCRIPT_DIR}/scripts" ]]; then
     fi
 fi
 
-# ── 11. HaloITSM notifications (optional) ────────────────────────────────────
+# ── 12. HaloITSM notifications (optional) ────────────────────────────────────
 # Enable with: ENABLE_HALO_NOTIFICATIONS=true sudo -E bash setup.sh
 ENABLE_HALO_NOTIFICATIONS="${ENABLE_HALO_NOTIFICATIONS:-false}"
 if [[ "$ENABLE_HALO_NOTIFICATIONS" == "true" ]]; then
@@ -547,7 +580,7 @@ else
     log "Skipping HaloITSM notification config (set ENABLE_HALO_NOTIFICATIONS=true to enable)"
 fi
 
-# ── 12. Go ────────────────────────────────────────────────────────────────────
+# ── 13. Go ────────────────────────────────────────────────────────────────────
 GO_VERSION="${GO_VERSION:-1.23.4}"
 log "Installing Go ${GO_VERSION}..."
 ARCH="$(dpkg --print-architecture)"
@@ -570,7 +603,7 @@ GOPATH
 export PATH=$PATH:/usr/local/go/bin
 log "Go $(/usr/local/go/bin/go version) installed"
 
-# ── 13. Passive checks (optional) ─────────────────────────────────────────────
+# ── 14. Passive checks (optional) ─────────────────────────────────────────────
 # Compiles bsp-poll and installs a cron job that polls QuestDB every 2 minutes
 # and submits passive check results to Icinga2 for all linux-player hosts.
 # Skip by pre-setting: ENABLE_PASSIVE_CHECKS=yes|no sudo -E bash setup.sh
@@ -612,11 +645,11 @@ else
     log "Skipping passive checks"
 fi
 
-# ── 14. Final restart ─────────────────────────────────────────────────────────
+# ── 15. Final restart ─────────────────────────────────────────────────────────
 log "Restarting all services..."
 svc restart redis-server icingadb icinga2 apache2
 
-# ── 14. Summary ───────────────────────────────────────────────────────────────
+# ── 16. Summary ───────────────────────────────────────────────────────────────
 HOSTNAME="$(hostname -f 2>/dev/null || hostname)"
 IP="$(hostname -I | awk '{print $1}')"
 

@@ -2,18 +2,18 @@
 # Shared library for Icinga2 scripts
 # Source this file: source "$(dirname "$0")/../scripts/lib.sh"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Load config (non-sensitive settings)
-if [[ -f "${SCRIPT_DIR}/config.env" ]]; then
+if [[ -f "${_LIB_DIR}/config.env" ]]; then
     # shellcheck source=config.env
-    source "${SCRIPT_DIR}/config.env"
+    source "${_LIB_DIR}/config.env"
 fi
 
 # Load secrets (credentials — gitignored, never committed)
-if [[ -f "${SCRIPT_DIR}/secrets.env" ]]; then
+if [[ -f "${_LIB_DIR}/secrets.env" ]]; then
     # shellcheck source=/dev/null
-    source "${SCRIPT_DIR}/secrets.env"
+    source "${_LIB_DIR}/secrets.env"
 fi
 
 # ─── Icinga2 API helpers ──────────────────────────────────────────────────────
