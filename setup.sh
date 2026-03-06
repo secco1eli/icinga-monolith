@@ -466,14 +466,15 @@ if [[ -d "${SCRIPT_DIR}/scripts" ]]; then
     if [[ ! -f /opt/icinga-scripts/secrets.env ]] && [[ -f /opt/icinga-scripts/secrets.env.example ]]; then
         cp /opt/icinga-scripts/secrets.env.example /opt/icinga-scripts/secrets.env
     fi
-    # Patch Icinga2 API password into secrets.env
+    # Always patch Icinga2 API password into secrets.env (regenerated on every setup run)
     if [[ -f /opt/icinga-scripts/secrets.env ]] && [[ -f /etc/icinga2/conf.d/api-users.conf ]]; then
-        if ! grep -q '^ICINGA2_PASS=' /opt/icinga-scripts/secrets.env 2>/dev/null || \
-           grep -q '^ICINGA2_PASS=""' /opt/icinga-scripts/secrets.env 2>/dev/null; then
-            log "Patching /opt/icinga-scripts/secrets.env with API credentials..."
-            API_PASS=$(awk '/object ApiUser "icinga-scripts"/{f=1} f && /password/{gsub(/[" ]/,"",$3); print $3; exit}' \
-                /etc/icinga2/conf.d/api-users.conf)
+        log "Patching /opt/icinga-scripts/secrets.env with API credentials..."
+        API_PASS=$(awk '/object ApiUser "icinga-scripts"/{f=1} f && /password/{gsub(/[" ]/,"",$3); print $3; exit}' \
+            /etc/icinga2/conf.d/api-users.conf)
+        if grep -q '^ICINGA2_PASS=' /opt/icinga-scripts/secrets.env 2>/dev/null; then
             sed -i "s|^ICINGA2_PASS=.*|ICINGA2_PASS=\"${API_PASS}\"|" /opt/icinga-scripts/secrets.env
+        else
+            echo "ICINGA2_PASS=\"${API_PASS}\"" >> /opt/icinga-scripts/secrets.env
         fi
     fi
     chmod 640 /opt/icinga-scripts/secrets.env 2>/dev/null || true
@@ -551,7 +552,12 @@ cat <<SUMMARY
 
   Login:       admin / ${ICINGAWEB_ADMIN_PASS}
 
-  Credentials: /etc/icinga-setup/credentials.env
+  All credentials saved to:
+               /etc/icinga-setup/credentials.env
+
+  NOTE: If using QuestDB host import, ensure
+  QUESTDB_USER and QUESTDB_PASS are set in:
+               /opt/icinga-scripts/secrets.env
 
   Go:          $(/usr/local/go/bin/go version 2>/dev/null | awk '{print $3}')
 
