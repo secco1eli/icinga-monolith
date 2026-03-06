@@ -570,7 +570,35 @@ GOPATH
 export PATH=$PATH:/usr/local/go/bin
 log "Go $(/usr/local/go/bin/go version) installed"
 
-# ── 13. Final restart ─────────────────────────────────────────────────────────
+# ── 13. Passive checks (optional) ─────────────────────────────────────────────
+# Enable with: ENABLE_PASSIVE_CHECKS=true sudo -E bash setup.sh
+# This compiles bsp-poll and installs a cron job that runs it every 2 minutes.
+ENABLE_PASSIVE_CHECKS="${ENABLE_PASSIVE_CHECKS:-false}"
+if [[ "$ENABLE_PASSIVE_CHECKS" == "true" ]]; then
+    BSP_SRC="/opt/icinga-scripts/checks/bsp-poll.go"
+    BSP_BIN="/opt/icinga-scripts/checks/bsp-poll"
+    BSP_WRAPPER="/opt/icinga-scripts/checks/run-bsp-poll.sh"
+    if [[ -f "$BSP_SRC" ]]; then
+        log "Building bsp-poll..."
+        (cd /opt/icinga-scripts/checks && /usr/local/go/bin/go build -o bsp-poll bsp-poll.go)
+        chmod +x "$BSP_BIN" "$BSP_WRAPPER"
+        log "bsp-poll built: $BSP_BIN"
+
+        CRON_FILE="/etc/cron.d/icinga-bsp-poll"
+        cat > "$CRON_FILE" <<CRONEOF
+# BSP-poll passive check — runs every 2 minutes, submits results to Icinga2
+*/2 * * * * root $BSP_WRAPPER --once >> /var/log/bsp-poll.log 2>&1
+CRONEOF
+        chmod 644 "$CRON_FILE"
+        log "Cron job installed: $CRON_FILE"
+    else
+        log "Warning: $BSP_SRC not found — skipping passive checks"
+    fi
+else
+    log "Skipping passive checks (set ENABLE_PASSIVE_CHECKS=true to enable)"
+fi
+
+# ── 14. Final restart ─────────────────────────────────────────────────────────
 log "Restarting all services..."
 svc restart redis-server icingadb icinga2 apache2
 
