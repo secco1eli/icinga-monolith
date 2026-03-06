@@ -19,7 +19,6 @@ echo "    - Packages: icinga2, icingadb, icingaweb2, mariadb, redis, apache2"
 echo "    - Databases: icingadb, icingaweb2"
 echo "    - Config dirs: /etc/icinga2, /etc/icingadb, /etc/icingaweb2, /etc/icinga-setup"
 echo "    - Data dirs: /var/lib/icinga2, /var/lib/redis"
-echo "    - SSL cert: /etc/ssl/icinga"
 echo "    - Cron jobs: /etc/cron.d/icinga-bsp-poll"
 echo "    - Scripts: /opt/icinga-scripts (config.env and secrets.env always preserved)"
 echo ""
@@ -80,15 +79,11 @@ log "Removing cron jobs and logs..."
 rm -f /etc/cron.d/icinga-bsp-poll
 rm -f /var/log/bsp-poll.log
 
-# ── 7. Remove SSL cert ────────────────────────────────────────────────────────
-log "Removing SSL certificate..."
-rm -rf /etc/ssl/icinga
-
-# ── 8. Remove Go ──────────────────────────────────────────────────────────────
+# ── 7. Remove Go ──────────────────────────────────────────────────────────────
 log "Removing Go..."
 rm -rf /usr/local/go /etc/profile.d/golang.sh
 
-# ── 9. Remove Icinga apt repo ─────────────────────────────────────────────────
+# ── 8. Remove Icinga apt repo ─────────────────────────────────────────────────
 log "Removing Icinga apt repository..."
 rm -f /etc/apt/sources.list.d/icinga.list /usr/share/keyrings/icinga-keyring.gpg
 apt-get update -qq 2>/dev/null || true
