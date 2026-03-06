@@ -4,7 +4,31 @@ Infrastructure-as-code for a single-server Icinga2 monitoring stack. The setup s
 
 Runs on Ubuntu 20.04 / 22.04 / 24.04 (bare metal, VM, or WSL2).
 
-See [docs/architecture.md](docs/architecture.md) for the QuestDB → Icinga2 data pipeline and passive check design.
+See [docs/architecture.md](docs/architecture.md) for the full data pipeline and passive check design.
+
+## How Data Flows from QuestDB into Icinga2
+
+```mermaid
+flowchart TD
+    QDB[(QuestDB\ntime-series data)]
+
+    QDB -->|"SELECT DISTINCT host FROM cpu\n(setup / manual)"| IMP[import-hosts-questdb.sh]
+    QDB -->|"SELECT host, timestamp FROM bsp\n(cron every 2 min)"| BSP[bsp-poll]
+
+    IMP -->|"PUT /v1/objects/hosts\nCreate linux-player hosts"| API
+
+    BSP -->|"POST /v1/actions/process-check-result\nOK / CRITICAL / UNKNOWN per host"| API
+
+    API[Icinga2 API :5665]
+    API --> IC[Icinga2 Engine]
+
+    IC --> RD[(Redis)]
+    RD --> IDB[IcingaDB]
+    IDB --> DB[(MariaDB)]
+    DB --> WEB[IcingaWeb2\nhttps://server/icingaweb2]
+
+    IC -->|"State change alerts"| HAL[HaloITSM\nnotifications]
+```
 
 ## Stack
 

@@ -452,8 +452,77 @@ Alias /icingaweb2 "/usr/share/icingaweb2/public"
 APACHECONF
 
 a2enconf icingaweb2
-svc enable apache2
-svc restart apache2
+a2enmod ssl headers 2>&1 | tee -a "$LOG_FILE" || true
+
+# ── 9b. HTTPS / SSL ───────────────────────────────────────────────────────────
+# Set SERVER_DOMAIN to a public FQDN to use Let's Encrypt; leave blank for self-signed.
+SERVER_DOMAIN="${SERVER_DOMAIN:-}"
+SERVER_HOSTNAME="${SERVER_HOSTNAME:-$(hostname -f 2>/dev/null || hostname)}"
+SSL_DIR="/etc/ssl/icinga"
+mkdir -p "$SSL_DIR"
+
+if [[ -n "$SERVER_DOMAIN" && "$SERVER_DOMAIN" != "localhost" ]]; then
+    log "Setting up Let's Encrypt SSL for ${SERVER_DOMAIN}..."
+    apt-get install -y -qq certbot python3-certbot-apache
+    svc enable apache2
+    svc restart apache2
+    certbot --apache -d "$SERVER_DOMAIN" \
+        --non-interactive --agree-tos \
+        -m "admin@${SERVER_DOMAIN}" \
+        --redirect \
+        2>&1 | tee -a "$LOG_FILE" \
+        || log "Warning: certbot failed — check DNS and port 80 accessibility"
+else
+    log "Generating self-signed SSL certificate for ${SERVER_HOSTNAME}..."
+    if [[ ! -f "$SSL_DIR/icinga.crt" ]]; then
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout "$SSL_DIR/icinga.key" \
+            -out   "$SSL_DIR/icinga.crt" \
+            -subj "/CN=${SERVER_HOSTNAME}" 2>/dev/null
+        chmod 600 "$SSL_DIR/icinga.key"
+        log "Self-signed certificate generated (valid 10 years): $SSL_DIR/icinga.crt"
+    fi
+
+    cat > /etc/apache2/sites-available/icinga-ssl.conf <<SSLCONF
+<VirtualHost *:80>
+    ServerName ${SERVER_HOSTNAME}
+    Redirect permanent / https://${SERVER_HOSTNAME}/
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName ${SERVER_HOSTNAME}
+
+    SSLEngine on
+    SSLCertificateFile    ${SSL_DIR}/icinga.crt
+    SSLCertificateKeyFile ${SSL_DIR}/icinga.key
+    Header always set Strict-Transport-Security "max-age=63072000"
+
+    Alias /icingaweb2 "/usr/share/icingaweb2/public"
+    <Directory "/usr/share/icingaweb2/public">
+        Options SymLinksIfOwnerMatch
+        AllowOverride None
+        DirectoryIndex index.php
+        Require all granted
+        SetEnv ICINGAWEB_CONFIGDIR "/etc/icingaweb2"
+        EnableSendfile Off
+        <IfModule mod_rewrite.c>
+            RewriteEngine on
+            RewriteBase /icingaweb2
+            RewriteCond %{REQUEST_FILENAME} -s [OR]
+            RewriteCond %{REQUEST_FILENAME} -l [OR]
+            RewriteCond %{REQUEST_FILENAME} -d
+            RewriteRule ^.*$ - [NC,L]
+            RewriteRule ^.*$ index.php [NC,L]
+        </IfModule>
+    </Directory>
+</VirtualHost>
+SSLCONF
+
+    a2ensite icinga-ssl 2>&1 | tee -a "$LOG_FILE" || true
+    a2dissite 000-default 2>/dev/null || true
+    svc enable apache2
+    svc restart apache2
+fi
 
 # ── 10. Copy custom config ────────────────────────────────────────────────────
 if [[ -d "${SCRIPT_DIR}/icingaweb2" ]]; then
@@ -637,8 +706,8 @@ cat <<SUMMARY
 ║        Icinga2 Monolith - Setup Complete       ║
 ╚═══════════════════════════════════════════════╝
 
-  Web UI:   http://${IP}/icingaweb2
-            http://${HOSTNAME}/icingaweb2
+  Web UI:   https://${IP}/icingaweb2
+            https://${HOSTNAME}/icingaweb2
 
 ┌─────────────────────────────────────────────┐
 │  LOGIN:  admin / ${ICINGAWEB_ADMIN_PASS}
