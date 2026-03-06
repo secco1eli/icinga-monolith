@@ -571,10 +571,24 @@ export PATH=$PATH:/usr/local/go/bin
 log "Go $(/usr/local/go/bin/go version) installed"
 
 # ── 13. Passive checks (optional) ─────────────────────────────────────────────
-# Enable with: ENABLE_PASSIVE_CHECKS=true sudo -E bash setup.sh
-# This compiles bsp-poll and installs a cron job that runs it every 2 minutes.
-ENABLE_PASSIVE_CHECKS="${ENABLE_PASSIVE_CHECKS:-false}"
-if [[ "$ENABLE_PASSIVE_CHECKS" == "true" ]]; then
+# Compiles bsp-poll and installs a cron job that polls QuestDB every 2 minutes
+# and submits passive check results to Icinga2 for all linux-player hosts.
+# Skip by pre-setting: ENABLE_PASSIVE_CHECKS=yes|no sudo -E bash setup.sh
+if [[ -z "${ENABLE_PASSIVE_CHECKS:-}" ]]; then
+    echo ""
+    echo "  Passive checks (BSP-poll):"
+    echo "    Compiles bsp-poll and schedules a cron job that polls QuestDB every"
+    echo "    2 minutes and submits check results to Icinga2 for all linux-player hosts."
+    echo "    Requires QUESTDB_HOST to be set in config.env."
+    echo ""
+    read -r -p "  Enable passive checks (BSP-poll cron job)? [y/N] " _passive_ans
+    echo ""
+    case "${_passive_ans,,}" in
+        y|yes) ENABLE_PASSIVE_CHECKS="yes" ;;
+        *)     ENABLE_PASSIVE_CHECKS="no"  ;;
+    esac
+fi
+if [[ "${ENABLE_PASSIVE_CHECKS,,}" =~ ^(yes|true|1)$ ]]; then
     BSP_SRC="/opt/icinga-scripts/checks/bsp-poll.go"
     BSP_BIN="/opt/icinga-scripts/checks/bsp-poll"
     BSP_WRAPPER="/opt/icinga-scripts/checks/run-bsp-poll.sh"
@@ -595,7 +609,7 @@ CRONEOF
         log "Warning: $BSP_SRC not found — skipping passive checks"
     fi
 else
-    log "Skipping passive checks (set ENABLE_PASSIVE_CHECKS=true to enable)"
+    log "Skipping passive checks"
 fi
 
 # ── 14. Final restart ─────────────────────────────────────────────────────────

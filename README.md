@@ -92,6 +92,29 @@ Make sure `HALO_URL`, `ICINGA2_WEB_URL`, `HALO_USER`, and `HALO_PASS` are set in
 
 The notification scripts (`notify-host-halo.sh`, `notify-service-halo.sh`) are always installed to `/opt/icinga-scripts/` — only the Icinga2 config that wires them in is gated behind the flag.
 
+### BSP-poll passive checks (optional)
+
+`setup.sh` will prompt during install:
+
+```
+  Enable passive checks (BSP-poll cron job)? [y/N]
+```
+
+Answering **y** will:
+- Compile `scripts/checks/bsp-poll.go` into a binary at `/opt/icinga-scripts/checks/bsp-poll`
+- Install `/etc/cron.d/icinga-bsp-poll` to run every 2 minutes
+
+The cron job calls `run-bsp-poll.sh`, which sources `config.env`/`secrets.env` and submits passive check results to Icinga2 for every `linux-player` host. The `BSP-poll` service is always registered on those hosts — the cron job is what feeds it results.
+
+To skip the prompt and pre-set the answer:
+
+```bash
+ENABLE_PASSIVE_CHECKS=yes sudo -E bash setup.sh   # enable
+ENABLE_PASSIVE_CHECKS=no  sudo -E bash setup.sh   # skip
+```
+
+Logs are written to `/var/log/bsp-poll.log`.
+
 ## Directory Structure
 
 ```
@@ -113,6 +136,8 @@ icinga/
     ├── notify-host-halo.sh           # HaloITSM host notification script
     ├── notify-service-halo.sh        # HaloITSM service notification script
     └── checks/
+        ├── bsp-poll.go               # BSP-poll passive check binary (built by setup.sh)
+        ├── run-bsp-poll.sh           # Cron wrapper — sources env files, runs bsp-poll
         └── check-questdb.sh          # QuestDB health check
 ```
 
