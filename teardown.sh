@@ -18,6 +18,22 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 [[ $EUID -eq 0 ]] || die "Run as root: sudo $0"
 
+# ── Confirmation prompt ───────────────────────────────────────────────────────
+echo ""
+echo "  WARNING: This will permanently remove the Icinga2 stack:"
+echo "    - Packages: icinga2, icingadb, icingaweb2, mariadb, redis, apache2"
+echo "    - Databases: icingadb, icingaweb2"
+echo "    - Config dirs: /etc/icinga2, /etc/icingadb, /etc/icingaweb2, /etc/icinga-setup"
+echo "    - Data dirs: /var/lib/icinga2, /var/lib/redis"
+echo "    - Scripts: /opt/icinga-scripts (config.env and secrets.env preserved)"
+if $FULL; then
+echo "    - config.env and secrets.env WILL also be deleted (--full mode)"
+fi
+echo ""
+read -r -p "  Type 'yes' to confirm: " CONFIRM
+echo ""
+[[ "$CONFIRM" == "yes" ]] || { echo "Aborted."; exit 0; }
+
 log "Starting teardown..."
 
 # ── 1. Stop services ──────────────────────────────────────────────────────────
