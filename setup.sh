@@ -509,6 +509,11 @@ if [[ -d "${SCRIPT_DIR}/scripts" ]]; then
     if [[ -n "$QHOST" && "$QHOST" != "localhost" ]]; then
         log "Running initial host import from QuestDB (${QHOST})..."
         bash /opt/icinga-scripts/import-hosts-questdb.sh || log "Warning: host import failed — check QuestDB connectivity"
+        echo ""
+        echo "┌─────────────────────────────────────────────┐"
+        echo "│  LOGIN:  admin / ${ICINGAWEB_ADMIN_PASS}"
+        echo "└─────────────────────────────────────────────┘"
+        echo ""
     else
         log "Skipping host import: QUESTDB_HOST not configured in /opt/icinga-scripts/config.env"
     fi
