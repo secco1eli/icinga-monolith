@@ -297,7 +297,8 @@ if [[ -d "${SCRIPT_DIR}/icinga2/conf.d" ]]; then
         /etc/icinga2/conf.d/hosts.conf
 fi
 
-svc enable --now icinga2
+svc enable icinga2
+svc restart icinga2
 
 # ── 8. IcingaWeb2 ─────────────────────────────────────────────────────────────
 log "Configuring IcingaWeb2..."
@@ -386,7 +387,7 @@ transport = "api"
 host = "localhost"
 port = 5665
 username = "icingaweb2"
-password = "$(grep 'password' /etc/icinga2/conf.d/api-users.conf | tail -1 | awk -F'"' '{print $2}')"
+password = "$(awk '/object ApiUser "icingaweb2"/{f=1} f && /password/{gsub(/[" ]/,"",$3); print $3; exit}' /etc/icinga2/conf.d/api-users.conf)"
 CMDTRANSPORT
 
 # Fix permissions
