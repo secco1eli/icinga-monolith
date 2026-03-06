@@ -134,6 +134,12 @@ curl -sSL https://r.mariadb.com/downloads/mariadb_repo_setup | bash -s -- --mari
 apt-get update -qq
 
 # ── 3. Package installation ───────────────────────────────────────────────────
+# Block service auto-start during apt install (needed on WSL2 where invoke-rc.d
+# cannot determine runlevel and causes dpkg postinst failures).
+echo '#!/bin/sh
+exit 101' > /usr/sbin/policy-rc.d
+chmod +x /usr/sbin/policy-rc.d
+
 log "Installing Icinga2, IcingaDB, IcingaWeb2, MariaDB, Redis, Apache2..."
 apt-get install -y -qq \
     icinga2 \
@@ -152,6 +158,9 @@ apt-get install -y -qq \
     php-intl \
     php-zip \
     php-imagick
+
+# Restore normal service behaviour after install
+rm -f /usr/sbin/policy-rc.d
 
 # ── 4. MariaDB setup ──────────────────────────────────────────────────────────
 log "Configuring MariaDB..."
