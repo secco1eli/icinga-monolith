@@ -4,10 +4,16 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Load config
+# Load config (non-sensitive settings)
 if [[ -f "${SCRIPT_DIR}/config.env" ]]; then
     # shellcheck source=config.env
     source "${SCRIPT_DIR}/config.env"
+fi
+
+# Load secrets (credentials — gitignored, never committed)
+if [[ -f "${SCRIPT_DIR}/secrets.env" ]]; then
+    # shellcheck source=/dev/null
+    source "${SCRIPT_DIR}/secrets.env"
 fi
 
 # ─── Icinga2 API helpers ──────────────────────────────────────────────────────
@@ -52,6 +58,7 @@ icinga2_api() {
 questdb_query() {
     local query="$1"
     curl -sSf \
+        ${QUESTDB_USER:+-u "${QUESTDB_USER}:${QUESTDB_PASS}"} \
         -G "http://${QUESTDB_HOST}:${QUESTDB_PORT}/exec" \
         --data-urlencode "query=${query}" \
         --data-urlencode "fmt=json"

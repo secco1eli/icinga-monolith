@@ -1,6 +1,8 @@
 # Icinga2 Monolith Setup
 
-Single-server monitoring stack on Ubuntu 20.04 / 22.04 / 24.04.
+Infrastructure-as-code for a single-server Icinga2 monitoring stack. The setup script is fully idempotent and WSL2-compatible, so you can spin up, tear down, and iterate on the full stack locally before deploying to a real server.
+
+Runs on Ubuntu 20.04 / 22.04 / 24.04 (bare metal, VM, or WSL2).
 
 ## Stack
 
@@ -18,41 +20,40 @@ Single-server monitoring stack on Ubuntu 20.04 / 22.04 / 24.04.
 
 Both config files live in `scripts/` and are gitignored — they are never committed. Create them from the examples before running `setup.sh`.
 
-### 1. scripts/config.env — connection settings
-
 ```bash
 cp scripts/config.env.example scripts/config.env
-```
-
-Edit `scripts/config.env`:
-
-```bash
-ICINGA2_HOST="localhost"          # Icinga2 API host (localhost for monolith)
-ICINGA2_PORT="5665"               # Icinga2 API port
-ICINGA2_USER="icinga-scripts"     # API user for scripts (created by setup.sh)
-
-QUESTDB_HOST="your-questdb-host"  # hostname or IP of your QuestDB instance
-QUESTDB_PORT="9000"               # QuestDB HTTP port
-
-ICINGA2_HOST_TEMPLATE="linux-player"  # host template for imported hosts
-ICINGA2_HOST_ZONE=""              # zone for imported hosts — leave blank for monolith
-```
-
-### 2. scripts/secrets.env — credentials
-
-```bash
 cp scripts/secrets.env.example scripts/secrets.env
 ```
 
-Edit `scripts/secrets.env`:
+### 1. scripts/config.env — connection settings
 
-```bash
-QUESTDB_USER="admin"              # QuestDB username
-QUESTDB_PASS="your-password"      # QuestDB password
-ICINGA2_PASS=""                   # leave blank — auto-filled by setup.sh
-```
+| Variable | Description | Required for |
+|---|---|---|
+| `ICINGA2_HOST` | Icinga2 API host (`localhost` for monolith) | always |
+| `ICINGA2_PORT` | Icinga2 API port (`5665`) | always |
+| `ICINGA2_USER` | API user for scripts (`icinga-scripts`) | always |
+| `QUESTDB_HOST` | Hostname or IP of your QuestDB instance | QuestDB host import |
+| `QUESTDB_PORT` | QuestDB HTTP port (`9000`) | QuestDB host import |
+| `ICINGA2_HOST_TEMPLATE` | Host template for imported hosts (`linux-player`) | QuestDB host import |
+| `ICINGA2_HOST_ZONE` | Zone for imported hosts — leave blank for monolith | QuestDB host import |
+| `HALO_URL` | HaloITSM API endpoint | HaloITSM notifications |
+| `ICINGA2_WEB_URL` | Base URL of your IcingaWeb2 UI | HaloITSM notifications |
+
+### 2. scripts/secrets.env — credentials
+
+| Variable | Description | Required for |
+|---|---|---|
+| `QUESTDB_USER` | QuestDB username | QuestDB host import |
+| `QUESTDB_PASS` | QuestDB password | QuestDB host import |
+| `ICINGA2_PASS` | Leave blank — auto-filled by `setup.sh` | always (auto-set) |
+| `HALO_USER` | HaloITSM client ID | HaloITSM notifications |
+| `HALO_PASS` | HaloITSM client secret | HaloITSM notifications |
 
 `ICINGA2_PASS` is automatically patched in by `setup.sh` after generating the `icinga-scripts` API user.
+
+**QuestDB host import** runs automatically during setup if `QUESTDB_HOST` is set to something other than `localhost`. If `QUESTDB_HOST` or credentials are not set, the import step is skipped silently.
+
+**HaloITSM notifications** require `HALO_URL`, `HALO_USER`, `HALO_PASS`, and `ICINGA2_WEB_URL` to be set, plus the `ENABLE_HALO_NOTIFICATIONS=true` flag at deploy time (see below).
 
 ## Deploy
 
@@ -85,19 +86,9 @@ HaloITSM notifications are **not deployed by default**. To enable them:
 ENABLE_HALO_NOTIFICATIONS=true sudo -E bash setup.sh
 ```
 
-This copies `icinga2/zones.d/master/notification_apply.conf` and `notification_templates.conf` to `/etc/icinga2/zones.d/master/`, which deploys the notification apply rules, templates, NotificationCommand objects, and the `halo-digital-user`.
+This copies `icinga2/zones.d/master/notification_apply.conf` and `notification_templates.conf` to `/etc/icinga2/zones.d/master/`, deploying the notification apply rules, templates, NotificationCommand objects, and the `halo-digital-user`.
 
-You must also fill in the HaloITSM credentials in `scripts/secrets.env` and `scripts/config.env` before or after setup:
-
-```bash
-# scripts/config.env
-HALO_URL="https://your-instance.haloitsm.com/api/notify/icinga"
-ICINGA2_WEB_URL="https://your-icinga2.example.com/icingaweb2"
-
-# scripts/secrets.env
-HALO_USER="your-client-id"
-HALO_PASS="your-client-secret"
-```
+Make sure `HALO_URL`, `ICINGA2_WEB_URL`, `HALO_USER`, and `HALO_PASS` are set in your `config.env` and `secrets.env` before running (see the table above).
 
 The notification scripts (`notify-host-halo.sh`, `notify-service-halo.sh`) are always installed to `/opt/icinga-scripts/` — only the Icinga2 config that wires them in is gated behind the flag.
 
@@ -135,24 +126,6 @@ To re-run manually:
 
 ```bash
 sudo bash /opt/icinga-scripts/import-hosts-questdb.sh
-```
-
-## Adding Hosts Manually
-
-Edit [icinga2/conf.d/hosts.conf](icinga2/conf.d/hosts.conf):
-
-```conf
-object Host "my-server" {
-  import "generic-host"
-  address = "192.168.1.10"
-  vars.os = "Linux"
-}
-```
-
-Then reload:
-
-```bash
-sudo icinga2 daemon -C && sudo systemctl reload icinga2
 ```
 
 ## Useful Commands

@@ -34,6 +34,11 @@ A single-server Icinga2 monitoring stack with a deployment script (`setup.sh`) a
 - WSL2: use `console`
 - Real server: use `systemd-journald`
 
+### `svc` fallback for WSL2 (no systemd)
+- `svc enable --now <name>` must detect `--now` explicitly and call `service <name> start`
+- The `enable` case in the fallback `case` statement maps to `true` (no-op) — `--now` is not inferred
+- After starting MariaDB, always wait for the socket with `mysqladmin ping` before running `mysql` commands — the socket at `/run/mysqld/mysqld.sock` may not be ready immediately
+
 ### Admin password on re-runs
 - Use `INSERT ... ON DUPLICATE KEY UPDATE` not `INSERT IGNORE`
 - Credentials saved to `/etc/icinga-setup/credentials.env`

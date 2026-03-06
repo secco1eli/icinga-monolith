@@ -32,7 +32,8 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-QUERY="${CUSTOM_QUERY:-${QUESTDB_HOST_QUERY}}"
+DEFAULT_QUERY="SELECT DISTINCT host AS host_name, '127.0.0.1' AS address FROM cpu"
+QUERY="${CUSTOM_QUERY:-${DEFAULT_QUERY}}"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
@@ -81,14 +82,20 @@ while IFS= read -r row; do
     [[ -n "$LOCATION" ]] && VARS_JSON+="\"location\": \"${LOCATION}\","
     VARS_JSON="${VARS_JSON%,}}"  # remove trailing comma
 
+    ZONE_JSON=""
+    [[ -n "${ICINGA2_HOST_ZONE:-}" ]] && ZONE_JSON="\"zone\": \"${ICINGA2_HOST_ZONE}\","
+
     BODY="$(cat <<JSON
 {
   "templates": ["${ICINGA2_HOST_TEMPLATE}"],
   "attrs": {
     "display_name": "${DISPLAY}",
     "address": "${ADDRESS}",
-    "vars": ${VARS_JSON},
-    "zone": "${ICINGA2_HOST_ZONE}"
+    "check_command": "dummy",
+    "enable_active_checks": false,
+    "enable_passive_checks": true,
+    ${ZONE_JSON}
+    "vars": ${VARS_JSON}
   }
 }
 JSON
