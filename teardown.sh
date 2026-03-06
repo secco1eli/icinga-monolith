@@ -1,17 +1,11 @@
 #!/usr/bin/env bash
 # Icinga2 Monolith Teardown Script
 # Removes all installed components so setup.sh can be re-run cleanly.
-# Preserves /opt/icinga-scripts/config.env and secrets.env by default.
+# config.env and secrets.env in /opt/icinga-scripts/ are always preserved.
 #
 # Usage:
 #   sudo bash teardown.sh
-#   sudo bash teardown.sh --full    # also removes config.env and secrets.env
 set -euo pipefail
-
-FULL=false
-for arg in "$@"; do
-    [[ "$arg" == "--full" ]] && FULL=true
-done
 
 die() { echo "[ERROR] $*" >&2; exit 1; }
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
@@ -25,10 +19,7 @@ echo "    - Packages: icinga2, icingadb, icingaweb2, mariadb, redis, apache2"
 echo "    - Databases: icingadb, icingaweb2"
 echo "    - Config dirs: /etc/icinga2, /etc/icingadb, /etc/icingaweb2, /etc/icinga-setup"
 echo "    - Data dirs: /var/lib/icinga2, /var/lib/redis"
-echo "    - Scripts: /opt/icinga-scripts (config.env and secrets.env preserved)"
-if $FULL; then
-echo "    - config.env and secrets.env WILL also be deleted (--full mode)"
-fi
+echo "    - Scripts: /opt/icinga-scripts (config.env and secrets.env always preserved)"
 echo ""
 read -r -p "  Type 'yes' to confirm: " CONFIRM
 echo ""
@@ -74,17 +65,12 @@ rm -rf \
 
 # ── 5. Remove custom scripts ──────────────────────────────────────────────────
 if [[ -d /opt/icinga-scripts ]]; then
-    if $FULL; then
-        log "Removing /opt/icinga-scripts (--full mode)..."
-        rm -rf /opt/icinga-scripts
-    else
-        log "Removing /opt/icinga-scripts (preserving config.env and secrets.env)..."
-        find /opt/icinga-scripts \
-            -not -name 'config.env' \
-            -not -name 'secrets.env' \
-            -not -path '/opt/icinga-scripts' \
-            -delete 2>/dev/null || true
-    fi
+    log "Removing /opt/icinga-scripts (preserving config.env and secrets.env)..."
+    find /opt/icinga-scripts \
+        -not -name 'config.env' \
+        -not -name 'secrets.env' \
+        -not -path '/opt/icinga-scripts' \
+        -delete 2>/dev/null || true
 fi
 
 # ── 6. Remove Go ──────────────────────────────────────────────────────────────
