@@ -34,9 +34,9 @@ for svc in icinga2 icingadb redis-server apache2 mariadb; do
     service "$svc" stop 2>/dev/null || true
 done
 
-# ── 2. Drop databases (must happen before MariaDB is purged) ──────────────────
-log "Dropping databases..."
-mysql -e "DROP DATABASE IF EXISTS icingadb; DROP DATABASE IF EXISTS icingaweb2;" 2>/dev/null || true
+# ── 2. Drop databases and users (must happen before MariaDB is purged) ────────
+log "Dropping databases and users..."
+mysql -e "DROP DATABASE IF EXISTS icingadb; DROP DATABASE IF EXISTS icingaweb2; DROP USER IF EXISTS 'icingadb'@'localhost'; DROP USER IF EXISTS 'icingaweb2'@'localhost'; FLUSH PRIVILEGES;" 2>/dev/null || true
 
 # ── 3. Remove packages ────────────────────────────────────────────────────────
 log "Purging packages..."
@@ -57,9 +57,13 @@ rm -rf \
     /etc/icingadb \
     /etc/icingaweb2 \
     /etc/icinga-setup \
+    /etc/redis \
+    /etc/mysql \
     /var/lib/icinga2 \
     /var/lib/redis \
+    /var/lib/mysql \
     /var/log/icinga2 \
+    /var/log/icingadb.log \
     /var/log/icinga-setup.log \
     /run/icinga2 \
     /run/icingadb
@@ -85,9 +89,20 @@ rm -f /var/log/icinga-import-hosts.log
 log "Removing Go..."
 rm -rf /usr/local/go /etc/profile.d/golang.sh
 
-# ── 8. Remove Icinga apt repo ─────────────────────────────────────────────────
-log "Removing Icinga apt repository..."
+# ── 8. Remove apt repos ───────────────────────────────────────────────────────
+log "Removing Icinga and MariaDB apt repositories..."
 rm -f /etc/apt/sources.list.d/icinga.list /usr/share/keyrings/icinga-keyring.gpg
+# mariadb_repo_setup adds entries under /etc/apt/sources.list.d/ with "mariadb" in the name
+rm -f /etc/apt/sources.list.d/mariadb.list /usr/share/keys/mariadb-keyring*.gpg \
+      /etc/apt/trusted.gpg.d/mariadb*.gpg 2>/dev/null || true
+# It may also write to /etc/apt/sources.list.d/mariadb*.list
+find /etc/apt/sources.list.d/ -name 'mariadb*' -delete 2>/dev/null || true
 apt-get update -qq 2>/dev/null || true
+
+# ── 9. WSL2 invoke-rc.d backup cleanup ────────────────────────────────────────
+if [[ -f /usr/sbin/invoke-rc.d.pre-icinga-setup ]]; then
+    log "Restoring invoke-rc.d from pre-icinga-setup backup..."
+    mv /usr/sbin/invoke-rc.d.pre-icinga-setup /usr/sbin/invoke-rc.d
+fi
 
 log "Teardown complete. You can now re-run: sudo bash setup.sh"
