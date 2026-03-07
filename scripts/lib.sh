@@ -76,17 +76,20 @@ submit_passive_check() {
     local perf_data="${5:-}"
 
     local type="Host"
-    local filter="host.name==\"${host}\""
+    local filter_val="host.name==\"${host}\""
     if [[ -n "$service" ]]; then
         type="Service"
-        filter="host.name==\"${host}\" && service.name==\"${service}\""
+        filter_val="host.name==\"${host}\" && service.name==\"${service}\""
     fi
+    # JSON-encode the filter string so embedded quotes are properly escaped
+    local filter
+    filter="$(printf '%s' "$filter_val" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
 
     local body
     body="$(cat <<JSON
 {
   "type": "${type}",
-  "filter": "${filter}",
+  "filter": ${filter},
   "exit_status": ${exit_code},
   "plugin_output": $(printf '%s' "$output" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
   "performance_data": $(printf '%s' "$perf_data" | python3 -c 'import json,sys; d=sys.stdin.read(); print("[]" if not d else json.dumps(d.split()))'),

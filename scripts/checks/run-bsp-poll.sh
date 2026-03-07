@@ -16,4 +16,18 @@ export ICINGA_API_BASE="https://${ICINGA2_HOST}:${ICINGA2_PORT}/"
 export ICINGA_API_USER="${ICINGA2_USER}"
 export ICINGA_API_PASS="${ICINGA2_PASS}"
 
-exec "${SCRIPT_DIR}/bsp-poll" "$@"
+MASTER_HOST="$(hostname -f)"
+SERVICE="BSP-poll Last Run"
+
+# Run bsp-poll; capture output to detect whether it completed a cycle at all.
+# Per-host 404s (e.g. master host has no BSP-poll service) cause a non-zero exit
+# but are not a heartbeat failure — individual states are tracked per host.
+BSP_OUTPUT="$("${SCRIPT_DIR}/bsp-poll" "$@" 2>&1)" || true
+echo "$BSP_OUTPUT"
+
+if echo "$BSP_OUTPUT" | grep -q "Shutdown complete"; then
+    submit_passive_check "$MASTER_HOST" "$SERVICE" 0 "OK: bsp-poll completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+else
+    submit_passive_check "$MASTER_HOST" "$SERVICE" 2 "CRITICAL: bsp-poll did not complete at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    exit 1
+fi
