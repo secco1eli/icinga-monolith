@@ -227,16 +227,19 @@ GRANT ALL PRIVILEGES ON ${ICINGAWEB_DB_NAME}.* TO '${ICINGAWEB_DB_USER}'@'localh
 FLUSH PRIVILEGES;
 SQL
 
-# Import IcingaDB schema (skip if tables already exist)
-log "Importing IcingaDB schema..."
-TABLE_COUNT=$(mysql -u "${ICINGA_DB_USER}" -p"${ICINGA_DB_PASS}" "${ICINGA_DB_NAME}" \
-    -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${ICINGA_DB_NAME}';" -sN 2>/dev/null || echo 0)
-if [[ "$TABLE_COUNT" -eq 0 ]]; then
-    mysql -u "${ICINGA_DB_USER}" -p"${ICINGA_DB_PASS}" "${ICINGA_DB_NAME}" \
-        < /usr/share/icingadb/schema/mysql/schema.sql
-else
-    log "IcingaDB schema already imported, skipping."
-fi
+# Always drop and reimport IcingaDB schema.
+# IcingaDB state is fully resynced from Icinga2 via Redis on startup, so
+# dropping it is safe. Skipping on re-runs leaves stale rows that cause
+# duplicate hosts in IcingaWeb2 when Icinga2 pushes a fresh sync.
+log "Importing IcingaDB schema (drop and reimport)..."
+mysql <<SQL
+DROP DATABASE IF EXISTS ${ICINGA_DB_NAME};
+CREATE DATABASE ${ICINGA_DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+GRANT ALL PRIVILEGES ON ${ICINGA_DB_NAME}.* TO '${ICINGA_DB_USER}'@'localhost';
+FLUSH PRIVILEGES;
+SQL
+mysql -u "${ICINGA_DB_USER}" -p"${ICINGA_DB_PASS}" "${ICINGA_DB_NAME}" \
+    < /usr/share/icingadb/schema/mysql/schema.sql
 
 # Import IcingaWeb2 schema (skip if tables already exist)
 log "Importing IcingaWeb2 schema..."
@@ -673,8 +676,24 @@ else
 fi
 
 # ── 15. Final restart ─────────────────────────────────────────────────────────
-log "Restarting all services..."
-svc restart redis-server icingadb icinga2 apache2
+# Restart Icinga2 first, wait for it to write Redis state, then restart IcingaDB.
+# Do NOT restart Redis — flushing it causes Icinga2 to push a fresh full state
+# sync, which IcingaDB inserts as new rows alongside existing ones (duplicate hosts).
+log "Restarting Icinga2..."
+svc restart icinga2
+log "Waiting for Icinga2 to write state to Redis before restarting IcingaDB..."
+_redis_ready=false
+for _ in $(seq 1 60); do
+    if redis-cli EXISTS icinga:stats 2>/dev/null | grep -q '^1$'; then
+        log "Icinga2 Redis state ready."
+        _redis_ready=true
+        break
+    fi
+    sleep 2
+done
+$_redis_ready || log "Warning: Icinga2 did not write to Redis within 120s — IcingaDB may not sync correctly."
+svc restart icingadb
+svc restart apache2
 
 # ── 16. Summary ───────────────────────────────────────────────────────────────
 HOSTNAME="$(hostname -f 2>/dev/null || hostname)"
@@ -716,6 +735,21 @@ cat <<SUMMARY
 
 ═══════════════════════════════════════════════
 SUMMARY
+
+# Wait for IcingaDB to finish its initial sync before importing hosts.
+# IcingaDB writes to icingadb_instance once it has connected and synced from Redis.
+log "Waiting for IcingaDB to sync..."
+_icingadb_ready=false
+for _ in $(seq 1 30); do
+    if mysql -u "${ICINGA_DB_USER}" -p"${ICINGA_DB_PASS}" "${ICINGA_DB_NAME}" \
+        -e "SELECT 1 FROM icingadb_instance LIMIT 1;" &>/dev/null 2>&1; then
+        log "IcingaDB synced."
+        _icingadb_ready=true
+        break
+    fi
+    sleep 2
+done
+$_icingadb_ready || log "Warning: IcingaDB did not sync within 60s — host import may produce duplicates."
 
 # Run initial host import in the background (requires VPN/QuestDB connectivity)
 QHOST=$(grep '^QUESTDB_HOST=' /opt/icinga-scripts/config.env 2>/dev/null | cut -d= -f2 | tr -d '"')
