@@ -50,7 +50,7 @@ PARTITION BY host
 [thresholds]
 crit_minutes   = 15     # CRITICAL if last poll > 15 minutes ago
 warn_minutes   = 0      # set to e.g. 10 to get a WARNING before CRITICAL
-resync_seconds = 21600  # 6 hours
+resync_seconds = 21600  # 6 hours to resync statefile
 
 # Per-host threshold overrides.
 # Rules are evaluated top-to-bottom; the FIRST match wins.
@@ -62,17 +62,13 @@ resync_seconds = 21600  # 6 hours
 # Examples:
 #
 # [[thresholds.host_overrides]]
-# pattern      = "realtime-feed-*"
-# crit_minutes = 5               # tighter window for real-time feeds
+# pattern      = "UK-RO-STM-P*"
+# crit_minutes = 5               # for higher priority PCs
 #
 # [[thresholds.host_overrides]]
-# pattern      = "batch-server-*"
-# crit_minutes = 120             # wider window for batch servers
+# pattern      = "UK-RO-WS1-P*"
+# crit_minutes = 120             # wider window for PCs with bad connection
 # warn_minutes = 90              # warn at 90 min, crit at 120 min
-#
-# [[thresholds.host_overrides]]
-# pattern      = "UK-RO-WS1-P001"
-# crit_minutes = 60              # specific host override
 
 # ── State ─────────────────────────────────────────────────────────────────────
 # Directory where per-host state (last posted status + timestamp) is persisted
