@@ -814,11 +814,20 @@ for _ in $(seq 1 30); do
 done
 $_icingadb_ready || log "Warning: IcingaDB did not sync within 60s — host import may produce duplicates."
 
-# Run initial host import in the background (requires VPN/QuestDB connectivity)
+# Clear bsp-poll state file so the first cron run does a full re-sync.
+# Needed when IcingaDB schema is reset (re-run) — stale state would suppress reposts.
+BSP_STATE="/var/lib/icinga2/bsp.state.json"
+if [[ -f "$BSP_STATE" ]]; then
+    log "Clearing bsp-poll state file ($BSP_STATE) to force full re-sync on next run..."
+    rm -f "$BSP_STATE"
+fi
+
+# Run initial host import synchronously so all hosts exist before bsp-poll cron fires.
 QHOST=$(grep '^QUESTDB_HOST=' /opt/icinga-scripts/config.env 2>/dev/null | cut -d= -f2 | tr -d '"')
 if [[ -f /opt/icinga-scripts/import-hosts-questdb.sh && -n "$QHOST" && "$QHOST" != "localhost" ]]; then
-    log "Running initial host import in background (log: /var/log/icinga-import-hosts.log)..."
-    nohup /opt/icinga-scripts/import-hosts-questdb.sh >> /var/log/icinga-import-hosts.log 2>&1 &
+    log "Running initial host import (log: /var/log/icinga-import-hosts.log)..."
+    /opt/icinga-scripts/import-hosts-questdb.sh >> /var/log/icinga-import-hosts.log 2>&1
+    log "Host import complete."
 else
     log "Skipping initial host import: QUESTDB_HOST not configured or script not found"
 fi
