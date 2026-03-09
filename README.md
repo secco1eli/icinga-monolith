@@ -117,19 +117,21 @@ Make sure `HALO_URL`, `ICINGA2_WEB_URL`, `HALO_USER`, and `HALO_PASS` are set in
 
 The notification scripts (`notify-host-halo.sh`, `notify-service-halo.sh`) are always installed to `/opt/icinga-scripts/` — only the Icinga2 config that wires them in is gated behind the flag.
 
-### BSP-poll passive checks (optional)
+### Passive checks (optional)
 
 `setup.sh` will prompt during install:
 
 ```
-  Enable passive checks (BSP-poll cron job)? [y/N]
+  Enable passive checks? [y/N]
 ```
 
-Answering **y** will:
-- Compile `scripts/checks/bsp-poll.go` into a binary at `/opt/icinga-scripts/checks/bsp-poll`
-- Install `/etc/cron.d/icinga-bsp-poll` to run every 2 minutes
+Answering **y** will auto-discover every check in `scripts/checks/` that has a `.toml` config file, then for each one:
+- Download Go module dependencies (`go.mod` / `go.sum`)
+- Compile `<name>.go` into a binary at `/opt/icinga-scripts/checks/<name>`
+- Read the cron schedule from `<name>.toml` via `<name> --cron`
+- Install `/etc/cron.d/icinga-<name>` with that schedule
 
-The cron job calls `run-bsp-poll.sh`, which sources `config.env`/`secrets.env` and submits passive check results to Icinga2 for every `linux-player` host. The `BSP-poll` service is always registered on those hosts — the cron job is what feeds it results.
+Each check's cron job calls `run-<name>.sh`, which sources `config.env`/`secrets.env` (credentials) and invokes the binary. The binary reads all other settings (query, thresholds, service name, etc.) from `<name>.toml`.
 
 To skip the prompt and pre-set the answer:
 
@@ -138,7 +140,9 @@ ENABLE_PASSIVE_CHECKS=yes sudo -E bash setup.sh   # enable
 ENABLE_PASSIVE_CHECKS=no  sudo -E bash setup.sh   # skip
 ```
 
-Logs are written to `/var/log/bsp-poll.log`.
+Logs are written to `/var/log/<check-name>.log`.
+
+**To add a new check:** see [docs/adding-a-check.md](docs/adding-a-check.md).
 
 ## Directory Structure
 

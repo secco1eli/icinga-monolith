@@ -328,7 +328,21 @@ object ApiUser "icinga-scripts" {
   password = "$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)"
   permissions = [ "objects/query/Host", "objects/create/Host", "objects/modify/Host", "objects/delete/Host", "actions/process-check-result" ]
 }
+
+object ApiUser "halo-digital-user" {
+  password = "$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)"
+  permissions = [ "actions/add-comment", "objects/query/Host", "objects/query/Service" ]
+}
 APIUSERS
+
+# Save halo-digital-user API password to credentials.env for use in HaloITSM webhook config
+HALO_API_PASS=$(awk '/object ApiUser "halo-digital-user"/{f=1} f && /password/{gsub(/[" ]/,"",$3); print $3; exit}' \
+    /etc/icinga2/conf.d/api-users.conf)
+if grep -q '^HALO_ICINGA2_PASS=' /etc/icinga-setup/credentials.env 2>/dev/null; then
+    sed -i "s|^HALO_ICINGA2_PASS=.*|HALO_ICINGA2_PASS=\"${HALO_API_PASS}\"|" /etc/icinga-setup/credentials.env
+else
+    echo "HALO_ICINGA2_PASS=\"${HALO_API_PASS}\"" >> /etc/icinga-setup/credentials.env
+fi
 
 # Copy local zone config from our config directory if present
 if [[ -d "${SCRIPT_DIR}/icinga2/conf.d" ]]; then
@@ -626,17 +640,17 @@ export PATH=$PATH:/usr/local/go/bin
 log "Go $(/usr/local/go/bin/go version) installed"
 
 # ── 14. Passive checks (optional) ─────────────────────────────────────────────
-# Compiles bsp-poll and installs a cron job that polls QuestDB every 2 minutes
-# and submits passive check results to Icinga2 for all linux-player hosts.
+# Auto-discovers Go checks in /opt/icinga-scripts/checks/ by scanning *.toml files.
+# Each check requires: <name>.go (source), <name>.toml (config), run-<name>.sh (wrapper).
+# To add a new check: add the files to scripts/checks/ in the repo and re-run setup.sh.
 # Skip by pre-setting: ENABLE_PASSIVE_CHECKS=yes|no sudo -E bash setup.sh
 if [[ -z "${ENABLE_PASSIVE_CHECKS:-}" ]]; then
     echo ""
-    echo "  Passive checks (BSP-poll):"
-    echo "    Compiles bsp-poll and schedules a cron job that polls QuestDB every"
-    echo "    2 minutes and submits check results to Icinga2 for all linux-player hosts."
+    echo "  Passive checks:"
+    echo "    Compiles and schedules all Go checks found in scripts/checks/*.toml."
     echo "    Requires QUESTDB_HOST to be set in config.env."
     echo ""
-    read -r -p "  Enable passive checks (BSP-poll cron job)? [y/N] " _passive_ans
+    read -r -p "  Enable passive checks? [y/N] " _passive_ans
     echo ""
     case "${_passive_ans,,}" in
         y|yes) ENABLE_PASSIVE_CHECKS="yes" ;;
@@ -644,33 +658,82 @@ if [[ -z "${ENABLE_PASSIVE_CHECKS:-}" ]]; then
     esac
 fi
 if [[ "${ENABLE_PASSIVE_CHECKS,,}" =~ ^(yes|true|1)$ ]]; then
-    BSP_SRC="/opt/icinga-scripts/checks/bsp-poll.go"
-    BSP_BIN="/opt/icinga-scripts/checks/bsp-poll"
-    BSP_WRAPPER="/opt/icinga-scripts/checks/run-bsp-poll.sh"
-    if [[ -f "$BSP_SRC" ]]; then
-        log "Building bsp-poll..."
-        (cd /opt/icinga-scripts/checks && /usr/local/go/bin/go build -o bsp-poll bsp-poll.go)
-        chmod +x "$BSP_BIN" "$BSP_WRAPPER"
-        log "bsp-poll built: $BSP_BIN"
+    CHECKS_DIR="/opt/icinga-scripts/checks"
 
-        CRON_FILE="/etc/cron.d/icinga-bsp-poll"
-        cat > "$CRON_FILE" <<CRONEOF
-# BSP-poll passive check — runs every 2 minutes, submits results to Icinga2
-*/2 * * * * root $BSP_WRAPPER --once >> /var/log/bsp-poll.log 2>&1
+    # Resolve and download Go module dependencies
+    if [[ -f "$CHECKS_DIR/go.mod" ]]; then
+        log "Resolving Go module dependencies..."
+        (cd "$CHECKS_DIR" && /usr/local/go/bin/go mod tidy)
+    fi
+
+    _found_checks=0
+    _logrotate_paths=""
+    for _toml in "$CHECKS_DIR"/*.toml; do
+        [[ -f "$_toml" ]] || continue
+        _name=$(basename "$_toml" .toml)
+        _src="$CHECKS_DIR/$_name.go"
+        _bin="$CHECKS_DIR/$_name"
+        _wrapper="$CHECKS_DIR/run-$_name.sh"
+        _cron_file="/etc/cron.d/icinga-$_name"
+        _log_file="/var/log/icinga-$_name.log"
+        _logrotate_paths+="$_log_file"$'\n'
+
+        if [[ ! -f "$_src" ]]; then
+            log "Warning: $_src not found — skipping $_name"
+            continue
+        fi
+
+        log "Building $_name..."
+        (cd "$CHECKS_DIR" && /usr/local/go/bin/go build -o "$_name" "$_name.go")
+        chmod +x "$_bin"
+        [[ -f "$_wrapper" ]] && chmod +x "$_wrapper"
+        log "$_name built: $_bin"
+
+        # Read cron schedule from binary (--cron reads <name>.toml [schedule].cron)
+        _cron=$("$_bin" --cron 2>/dev/null || true)
+        if [[ -z "$_cron" ]]; then
+            log "Warning: $_name --cron returned empty — skipping cron install"
+            continue
+        fi
+
+        cat > "$_cron_file" <<CRONEOF
+# $_name passive check — schedule defined in $_name.toml
+$_cron root $_wrapper >> $_log_file 2>&1
 CRONEOF
-        chmod 644 "$CRON_FILE"
-        log "Cron job installed: $CRON_FILE"
+        chmod 644 "$_cron_file"
+        log "Cron job installed: $_cron_file ($_cron)"
+        ((_found_checks++)) || true
+    done
 
-        IMPORT_CRON_FILE="/etc/cron.d/icinga-import-hosts"
-        cat > "$IMPORT_CRON_FILE" <<CRONEOF
+    if ((_found_checks == 0)); then
+        log "No checks found in $CHECKS_DIR"
+    fi
+
+    IMPORT_CRON_FILE="/etc/cron.d/icinga-import-hosts"
+    cat > "$IMPORT_CRON_FILE" <<CRONEOF
 # Import hosts from QuestDB into Icinga2 every 8 hours
 0 */8 * * * root /opt/icinga-scripts/import-hosts-questdb.sh >> /var/log/icinga-import-hosts.log 2>&1
 CRONEOF
-        chmod 644 "$IMPORT_CRON_FILE"
-        log "Host import cron job installed: $IMPORT_CRON_FILE"
-    else
-        log "Warning: $BSP_SRC not found — skipping passive checks"
-    fi
+    chmod 644 "$IMPORT_CRON_FILE"
+    log "Host import cron job installed: $IMPORT_CRON_FILE"
+
+    # Install logrotate config for all check logs + import-hosts and setup logs
+    _logrotate_file="/etc/logrotate.d/icinga-checks"
+    cat > "$_logrotate_file" <<LOGROTEOF
+${_logrotate_paths}/var/log/icinga-import-hosts.log
+/var/log/icinga-setup.log
+{
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+LOGROTEOF
+    chmod 644 "$_logrotate_file"
+    log "Logrotate config installed: $_logrotate_file (weekly, 4 weeks retention)"
 else
     log "Skipping passive checks"
 fi

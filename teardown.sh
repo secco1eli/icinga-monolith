@@ -19,7 +19,7 @@ echo "    - Packages: icinga2, icingadb, icingaweb2, mariadb, redis, apache2"
 echo "    - Databases: icingadb, icingaweb2"
 echo "    - Config dirs: /etc/icinga2, /etc/icingadb, /etc/icingaweb2, /etc/icinga-setup"
 echo "    - Data dirs: /var/lib/icinga2, /var/lib/redis"
-echo "    - Cron jobs: /etc/cron.d/icinga-bsp-poll, /etc/cron.d/icinga-import-hosts"
+echo "    - Cron jobs: /etc/cron.d/icinga-* and /etc/logrotate.d/icinga-checks"
 echo "    - Scripts: /opt/icinga-scripts (config.env and secrets.env always preserved)"
 echo ""
 read -r -p "  Type 'yes' to confirm: " CONFIRM
@@ -79,11 +79,12 @@ if [[ -d /opt/icinga-scripts ]]; then
 fi
 
 # ── 6. Remove cron jobs and logs ──────────────────────────────────────────────
-log "Removing cron jobs and logs..."
-rm -f /etc/cron.d/icinga-bsp-poll
-rm -f /etc/cron.d/icinga-import-hosts
-rm -f /var/log/bsp-poll.log
-rm -f /var/log/icinga-import-hosts.log
+log "Removing cron jobs, logrotate config, and logs..."
+# All check cron jobs, import-hosts cron, and all icinga-prefixed log files
+for _f in /etc/cron.d/icinga-* /var/log/icinga-*; do
+    rm -f "$_f"
+done
+rm -f /etc/logrotate.d/icinga-checks
 
 # ── 7. Remove Go ──────────────────────────────────────────────────────────────
 log "Removing Go..."

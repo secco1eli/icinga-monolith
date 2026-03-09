@@ -1,15 +1,18 @@
 // bsp-poll.go
 //
 // Polls QuestDB for BSP timestamps and submits passive check results to Icinga2.
-// Credentials and connection settings are read from environment variables,
-// which are set by the run-bsp-poll.sh wrapper (sourced from config.env/secrets.env).
+//
+// Config is read from bsp-poll.toml in the same directory as the binary.
+// Credentials and connection settings are injected as environment variables
+// by run-bsp-poll.sh (sourced from config.env / secrets.env).
 //
 // Build:
-//   go build -o bsp-poll bsp-poll.go
+//   cd scripts/checks && go mod tidy && go build -o bsp-poll bsp-poll.go
 // Run via wrapper (sets env from config.env/secrets.env):
 //   ./run-bsp-poll.sh [--dry-run]
-// Run once and exit (for cron):
-//   ./run-bsp-poll.sh --once
+// Print cron schedule (used by setup.sh to install /etc/cron.d/):
+//   ./bsp-poll --cron
+// Runs one poll cycle and exits — scheduling is handled by cron.
 
 package main
 
@@ -28,14 +31,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
+
+	"github.com/BurntSushi/toml"
 )
 
 type Metric struct {
@@ -57,53 +60,92 @@ type StateEntry struct {
 	PostedAt  int64 `json:"posted_at,omitempty"`
 }
 
+// Config holds all settings from the check's TOML config file (<binary>.toml).
+// Credentials and connection settings are NOT here — they come from environment
+// variables set by run-<check>.sh (sourced from config.env / secrets.env).
+type Config struct {
+	Schedule struct {
+		Cron string `toml:"cron"`
+	} `toml:"schedule"`
+
+	Icinga struct {
+		ServiceName       string `toml:"service_name"`
+		MissingHostStatus int    `toml:"missing_host_status"`
+	} `toml:"icinga"`
+
+	QuestDB struct {
+		Query           string `toml:"query"`
+		TimestampColumn string `toml:"timestamp_column"`
+	} `toml:"questdb"`
+
+	Thresholds struct {
+		CritMinutes   int64 `toml:"crit_minutes"`
+		WarnMinutes   int64 `toml:"warn_minutes"`   // 0 = no warning level, jump straight to CRITICAL
+		ResyncSeconds int64 `toml:"resync_seconds"`
+		HostOverrides []struct {
+			Pattern     string `toml:"pattern"`
+			CritMinutes int    `toml:"crit_minutes"`
+			WarnMinutes int    `toml:"warn_minutes"` // 0 = inherit global warn_minutes
+		} `toml:"host_overrides"`
+	} `toml:"thresholds"`
+
+	State struct {
+		Dir string `toml:"dir"`
+	} `toml:"state"`
+
+	Reliability struct {
+		PostRetries int     `toml:"post_retries"`
+		PostBackoff float64 `toml:"post_backoff"`
+		MaxWorkers  int     `toml:"max_workers"`
+	} `toml:"reliability"`
+}
+
+// loadConfig loads <binary-name>.toml from the same directory as the running binary.
+func loadConfig() Config {
+	exe, err := os.Executable()
+	if err != nil {
+		logger.Fatalf("Cannot determine executable path: %v", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		logger.Fatalf("Cannot resolve executable symlinks: %v", err)
+	}
+	exeDir := filepath.Dir(exe)
+	exeName := strings.TrimSuffix(filepath.Base(exe), filepath.Ext(filepath.Base(exe)))
+	configPath := filepath.Join(exeDir, exeName+".toml")
+
+	var cfg Config
+	if _, err := toml.DecodeFile(configPath, &cfg); err != nil {
+		logger.Fatalf("Cannot load config %s: %v", configPath, err)
+	}
+	logger.Printf("Loaded config from %s", configPath)
+	return cfg
+}
+
 var (
-	// Connection settings — set via environment (run-bsp-poll.sh sources config.env/secrets.env)
+	// ── Credentials & connection — set by run-<check>.sh from config.env / secrets.env ──
 	QUESTDB_URL         = getenv("QUESTDB_URL", "")
 	QUESTDB_USER        = getenv("QUESTDB_USER", "")
 	QUESTDB_PASS        = getenv("QUESTDB_PASS", "")
-	POLL_INTERVAL       = getenvInt("POLL_INTERVAL", 120)
 	ICINGA_API_BASE     = getenv("ICINGA_API_BASE", "https://localhost:5665/")
 	ICINGA_API_ACTION   = getenv("ICINGA_API_ACTION", "v1/actions/process-check-result")
 	ICINGA_API_USER     = getenv("ICINGA_API_USER", "")
 	ICINGA_API_PASS     = getenv("ICINGA_API_PASS", "")
 	ICINGA_VERIFY_TLS   = getenvBool("ICINGA_VERIFY_TLS", false)
-	STATE_DIR           = getenv("STATE_DIR", "/var/lib/icinga2")
-	COMBINED_STATE_FILE = getenv("COMBINED_STATE_FILE", "")
-	POST_RETRIES        = getenvInt("POST_RETRIES", 3)
-	POST_BACKOFF        = getenvFloat("POST_BACKOFF", 1.0)
-	MAX_WORKERS_DEFAULT = getenvInt("MAX_WORKERS_DEFAULT", 40)
+	COMBINED_STATE_FILE = getenv("COMBINED_STATE_FILE", "") // optional: override state file path
 
-	// status to use when host exists in Icinga but not in QuestDB; default UNKNOWN (3)
-	MISSING_HOST_STATUS = getenvInt("MISSING_HOST_STATUS", 3)
-
-	// default service name to use for passive check postings.
-	// Can be overridden per metric via Metric.PassiveService.
-	PASSIVE_SERVICE_NAME = "BSP-poll"
-
-	// age in seconds after which a datapoint is considered stale
-	STALE_THRESHOLD_SECONDS = int64(getenvInt("STALE_THRESHOLD_SECONDS", 15*60)) // 15 minutes
-
-	// how often to force re-post all hosts regardless of status change (0 = never force)
-	RESYNC_INTERVAL_SECONDS = int64(getenvInt("RESYNC_INTERVAL_SECONDS", 6*3600)) // 6 hours
-
-	// path to per-host threshold overrides config file
-	THRESHOLDS_FILE = getenv("THRESHOLDS_FILE", "/opt/icinga-scripts/bsp-poll-thresholds.conf")
-
-	// metrics: single bsp timestamp metric by default
-	METRICS = []Metric{
-		{
-			Name: "bsp",
-			Query: `SELECT host, timestamp
-	FROM bsp
-	LATEST ON timestamp
-	PARTITION BY host`,
-			Column:         "timestamp",
-			Service:        "BSP-poll", // must match Icinga service name exactly
-			PassiveService: "",
-			IsTimestamp:    true,
-		},
-	}
+	// ── Behavioral settings — loaded from bsp-poll.toml in main() ────────────
+	PASSIVE_SERVICE_NAME    string
+	CRIT_THRESHOLD_SECONDS  int64
+	WARN_THRESHOLD_SECONDS  int64 // 0 = no warning level
+	RESYNC_INTERVAL_SECONDS int64
+	MISSING_HOST_STATUS     int
+	STATE_DIR               string
+	POST_RETRIES            int
+	POST_BACKOFF            float64
+	MAX_WORKERS_DEFAULT     int
+	thresholdRules          []thresholdRule
+	METRICS                 []Metric
 
 	logger     = log.New(os.Stdout, "", log.LstdFlags)
 	httpClient *http.Client
@@ -126,18 +168,6 @@ func getenvInt(key string, def int) int {
 		return def
 	}
 	return n
-}
-
-func getenvFloat(key string, def float64) float64 {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil {
-		return def
-	}
-	return f
 }
 
 // formatAge returns a human-readable duration string for a number of seconds.
@@ -169,57 +199,28 @@ func getenvBool(key string, def bool) bool {
 	return v == "1" || v == "true" || v == "yes"
 }
 
-// thresholdRule maps a host glob pattern to a stale threshold in seconds.
+// thresholdRule maps a host glob pattern to warn/crit thresholds in seconds.
+// WarnSeconds == 0 means no warning level — go straight to CRITICAL.
 type thresholdRule struct {
-	Pattern string
-	Seconds int64
+	Pattern     string
+	CritSeconds int64
+	WarnSeconds int64
 }
 
-// loadHostThresholds reads per-host stale threshold rules from the config file.
-// Format: hostname_or_glob = minutes  (one per line, # for comments)
-// First match wins — put specific patterns before broad wildcards.
-func loadHostThresholds(path string) []thresholdRule {
-	var rules []thresholdRule
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			logger.Printf("Warning: cannot read thresholds file %s: %v", path, err)
-		}
-		return rules
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		pattern := strings.TrimSpace(parts[0])
-		valStr := strings.TrimSpace(parts[1])
-		minutes, err := strconv.ParseInt(valStr, 10, 64)
-		if err != nil {
-			logger.Printf("Warning: bad threshold for pattern %q: %v", pattern, err)
-			continue
-		}
-		rules = append(rules, thresholdRule{Pattern: pattern, Seconds: minutes * 60})
-	}
-	if len(rules) > 0 {
-		logger.Printf("Loaded %d threshold rules from %s", len(rules), path)
-	}
-	return rules
+type hostThresholds struct {
+	CritSeconds int64
+	WarnSeconds int64 // 0 = no warning level
 }
 
-// hostThreshold returns the stale threshold in seconds for host.
-// Uses the first matching rule from rules; falls back to STALE_THRESHOLD_SECONDS.
-func hostThreshold(host string, rules []thresholdRule) int64 {
+// hostThreshold returns the warn/crit thresholds in seconds for host.
+// Uses the first matching rule from rules; falls back to global defaults.
+func hostThreshold(host string, rules []thresholdRule) hostThresholds {
 	for _, r := range rules {
 		if matched, err := filepath.Match(r.Pattern, host); err == nil && matched {
-			return r.Seconds
+			return hostThresholds{CritSeconds: r.CritSeconds, WarnSeconds: r.WarnSeconds}
 		}
 	}
-	return STALE_THRESHOLD_SECONDS
+	return hostThresholds{CritSeconds: CRIT_THRESHOLD_SECONDS, WarnSeconds: WARN_THRESHOLD_SECONDS}
 }
 
 func initHTTPClient() {
@@ -249,9 +250,48 @@ func initHTTPClient() {
 }
 
 func main() {
+	printCron := flag.Bool("cron", false, "Print cron schedule from config and exit (used by setup.sh)")
 	dryRun := flag.Bool("dry-run", false, "Parse and show changes but don't contact Icinga")
-	once := flag.Bool("once", false, "Run one poll cycle then exit (for cron use)")
 	flag.Parse()
+
+	cfg := loadConfig()
+
+	if *printCron {
+		fmt.Println(cfg.Schedule.Cron)
+		return
+	}
+
+	// Apply behavioral settings from TOML config
+	PASSIVE_SERVICE_NAME    = cfg.Icinga.ServiceName
+	CRIT_THRESHOLD_SECONDS  = cfg.Thresholds.CritMinutes * 60
+	WARN_THRESHOLD_SECONDS  = cfg.Thresholds.WarnMinutes * 60
+	RESYNC_INTERVAL_SECONDS = cfg.Thresholds.ResyncSeconds
+	MISSING_HOST_STATUS     = cfg.Icinga.MissingHostStatus
+	STATE_DIR               = cfg.State.Dir
+	POST_RETRIES            = cfg.Reliability.PostRetries
+	POST_BACKOFF            = cfg.Reliability.PostBackoff
+	MAX_WORKERS_DEFAULT     = cfg.Reliability.MaxWorkers
+
+	// Build per-host threshold rules from config (ordered, first match wins)
+	for _, h := range cfg.Thresholds.HostOverrides {
+		thresholdRules = append(thresholdRules, thresholdRule{
+			Pattern:     h.Pattern,
+			CritSeconds: int64(h.CritMinutes) * 60,
+			WarnSeconds: int64(h.WarnMinutes) * 60,
+		})
+	}
+	if len(thresholdRules) > 0 {
+		logger.Printf("Loaded %d host threshold rules from config", len(thresholdRules))
+	}
+
+	// Build metric from TOML config
+	METRICS = []Metric{{
+		Name:        "bsp",
+		Query:       strings.TrimSpace(cfg.QuestDB.Query),
+		Column:      cfg.QuestDB.TimestampColumn,
+		Service:     cfg.Icinga.ServiceName,
+		IsTimestamp: true,
+	}}
 
 	if QUESTDB_URL == "" {
 		logger.Fatal("QUESTDB_URL is not set — run via run-bsp-poll.sh or set environment variables")
@@ -261,61 +301,26 @@ func main() {
 	}
 
 	initHTTPClient()
-	setupSignalHandler()
 
-	logger.Printf("Starting collector; POLL_INTERVAL=%ds, metrics=%d, once=%v", POLL_INTERVAL, len(METRICS), *once)
+	logger.Printf("Starting poll cycle; metrics=%d", len(METRICS))
 
-runLoop:
-	for {
-		if atomic.LoadInt32(&shutdownFlag) == 1 {
-			break runLoop
+	changedAny := false
+	for _, metric := range METRICS {
+		changed, err := runMetricOnce(metric, *dryRun)
+		if err != nil {
+			logger.Printf("Metric %s failed: %v", metric.Name, err)
+			continue
 		}
-
-		changedAny := false
-		for _, metric := range METRICS {
-			if atomic.LoadInt32(&shutdownFlag) == 1 {
-				break
-			}
-			changed, err := runMetricOnce(metric, *dryRun)
-			if err != nil {
-				logger.Printf("Metric %s failed: %v", metric.Name, err)
-				continue
-			}
-			if changed {
-				changedAny = true
-			}
-		}
-
-		if changedAny {
-			logger.Printf("Changes applied this cycle")
-		}
-
-		if *once {
-			break runLoop
-		}
-
-		// responsive sleep
-		for i := 0; i < POLL_INTERVAL; i++ {
-			if atomic.LoadInt32(&shutdownFlag) == 1 {
-				break runLoop
-			}
-			time.Sleep(1 * time.Second)
+		if changed {
+			changedAny = true
 		}
 	}
 
+	if changedAny {
+		logger.Printf("Changes applied this cycle")
+	}
+
 	logger.Printf("Shutdown complete")
-}
-
-var shutdownFlag int32 = 0
-
-func setupSignalHandler() {
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		sig := <-signals
-		logger.Printf("Signal %v received; shutting down", sig)
-		atomic.StoreInt32(&shutdownFlag, 1)
-	}()
 }
 
 func _statePathForMetric(m Metric) string {
@@ -657,7 +662,7 @@ func extractTimestamp(val interface{}) (int64, bool) {
 // runMetricOnce posts all hosts on the metric's first run, posts missing hosts present in Icinga,
 // and marks datapoints older than STALE_THRESHOLD_SECONDS as UNKNOWN or CRITICAL depending on metric type.
 func runMetricOnce(metric Metric, dryRun bool) (bool, error) {
-	threshRules := loadHostThresholds(THRESHOLDS_FILE)
+	threshRules := thresholdRules
 
 	statePath := _statePathForMetric(metric)
 	prevState, _ := loadState(statePath)
@@ -719,23 +724,25 @@ func runMetricOnce(metric Metric, dryRun bool) (bool, error) {
 				}
 			}
 			now := time.Now().Unix()
-			threshold := hostThreshold(host, threshRules)
+			thresh := hostThreshold(host, threshRules)
 			status := 3
 			output := ""
 			if ts == 0 {
 				status = 3
 				output = "UNKNOWN: no timestamp value"
-			} else if now-ts > threshold {
-				// stale timestamp is CRITICAL for timestamp metrics
-				status = 2
-				age := now - ts
-				humanTs := time.Unix(ts, 0).Local().Format("2006-01-02 15:04:05 MST")
-				output = fmt.Sprintf("CRITICAL: last poll %s ago (%s)", formatAge(age), humanTs)
 			} else {
-				status = 0
 				age := now - ts
 				humanTs := time.Unix(ts, 0).Local().Format("2006-01-02 15:04:05 MST")
-				output = fmt.Sprintf("OK: last poll %s ago (%s)", formatAge(age), humanTs)
+				if age > thresh.CritSeconds {
+					status = 2
+					output = fmt.Sprintf("CRITICAL: last poll %s ago (%s)", formatAge(age), humanTs)
+				} else if thresh.WarnSeconds > 0 && age > thresh.WarnSeconds {
+					status = 1
+					output = fmt.Sprintf("WARNING: last poll %s ago (%s)", formatAge(age), humanTs)
+				} else {
+					status = 0
+					output = fmt.Sprintf("OK: last poll %s ago (%s)", formatAge(age), humanTs)
+				}
 			}
 			key := fmt.Sprintf("%s:%s", metric.Name, host)
 			// determine service name for passive posting: metric.PassiveService -> metric.Service -> global default
@@ -777,7 +784,7 @@ func runMetricOnce(metric Metric, dryRun bool) (bool, error) {
 
 		// If datapoint is stale, override status and output (legacy behavior: UNKNOWN)
 		now := time.Now().Unix()
-		if ts != 0 && now-ts > hostThreshold(host, threshRules) {
+		if ts != 0 && now-ts > hostThreshold(host, threshRules).CritSeconds {
 			status = 3
 			humanTs := time.Unix(ts, 0).Format(time.RFC3339)
 			out = fmt.Sprintf("UNKNOWN: stale datapoint (%s) - %s", humanTs, out)

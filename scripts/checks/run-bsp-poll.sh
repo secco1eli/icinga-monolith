@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # run-bsp-poll.sh
-# Sources config.env and secrets.env, then runs the bsp-poll binary.
-# Designed to be called from cron:
-#   */2 * * * * root /opt/icinga-scripts/checks/run-bsp-poll.sh --once
+# Cron wrapper for the bsp-poll passive check.
+# Sources config.env and secrets.env, exports credentials as env vars,
+# then runs the bsp-poll binary (which reads all other settings from bsp-poll.toml).
+#
+# Cron schedule is defined in bsp-poll.toml [schedule].cron.
+# setup.sh installs the cron entry automatically — do not edit /etc/cron.d/ directly.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

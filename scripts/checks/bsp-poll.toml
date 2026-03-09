@@ -1,0 +1,90 @@
+# bsp-poll.toml — Configuration for the BSP-poll passive check.
+#
+# Read by the bsp-poll binary at startup. The binary looks for this file
+# in the same directory as itself: <install-dir>/bsp-poll.toml
+#
+# Credentials and connection settings are NOT here — they live in:
+#   /opt/icinga-scripts/config.env    (QuestDB host/port, Icinga host/port)
+#   /opt/icinga-scripts/secrets.env   (passwords)
+# and are injected as environment variables by run-bsp-poll.sh.
+#
+# After editing this file, changes take effect on the next cron run.
+# No binary rebuild or service restart needed.
+
+# ── Scheduling ────────────────────────────────────────────────────────────────
+# Cron expression for how often this check runs.
+# setup.sh reads this via `bsp-poll --cron` to install /etc/cron.d/icinga-bsp-poll.
+# Never edit cron files directly — change this value and re-run setup.sh.
+[schedule]
+cron = "*/2 * * * *"
+
+# ── Icinga integration ────────────────────────────────────────────────────────
+# service_name: must match the apply Service block in icinga2/conf.d/services.conf.
+# missing_host_status: status posted when a host appears in Icinga but is absent
+#   from QuestDB. 0=OK  1=WARNING  2=CRITICAL  3=UNKNOWN
+[icinga]
+service_name        = "BSP-poll"
+missing_host_status = 3
+
+# ── QuestDB query ─────────────────────────────────────────────────────────────
+# SQL executed against QuestDB on each poll cycle.
+# Must return columns: host (STRING), <timestamp_column> (TIMESTAMP).
+# LATEST ON ... PARTITION BY host returns one row per host (most recent only).
+[questdb]
+timestamp_column = "timestamp"
+query = """
+SELECT host, timestamp
+FROM bsp
+LATEST ON timestamp
+PARTITION BY host
+"""
+
+# ── Staleness thresholds ──────────────────────────────────────────────────────
+# This check evaluates timestamps — it posts CRITICAL when a host's last poll
+# is older than crit_minutes, WARNING when older than warn_minutes (0 = disabled).
+#
+# crit_minutes: age before a host is posted as CRITICAL  (required)
+# warn_minutes: age before a host is posted as WARNING   (0 = skip warning, go straight to CRITICAL)
+# resync_seconds: interval to force-repost all results regardless of state change
+#   (keeps Icinga from expiring passive results). 0 = never force.
+[thresholds]
+crit_minutes   = 15     # CRITICAL if last poll > 15 minutes ago
+warn_minutes   = 0      # set to e.g. 10 to get a WARNING before CRITICAL
+resync_seconds = 21600  # 6 hours
+
+# Per-host threshold overrides.
+# Rules are evaluated top-to-bottom; the FIRST match wins.
+# Put specific patterns before broad wildcards.
+# Pattern supports globs: * matches any sequence, ? matches one character.
+# crit_minutes and warn_minutes work the same as the global defaults above.
+# warn_minutes = 0 means inherit global warn_minutes (disabled unless set here).
+#
+# Examples:
+#
+# [[thresholds.host_overrides]]
+# pattern      = "realtime-feed-*"
+# crit_minutes = 5               # tighter window for real-time feeds
+#
+# [[thresholds.host_overrides]]
+# pattern      = "batch-server-*"
+# crit_minutes = 120             # wider window for batch servers
+# warn_minutes = 90              # warn at 90 min, crit at 120 min
+#
+# [[thresholds.host_overrides]]
+# pattern      = "UK-RO-WS1-P001"
+# crit_minutes = 60              # specific host override
+
+# ── State ─────────────────────────────────────────────────────────────────────
+# Directory where per-host state (last posted status + timestamp) is persisted
+# between cron runs. Used to suppress re-posting of unchanged results.
+[state]
+dir = "/var/lib/icinga2"
+
+# ── Reliability ───────────────────────────────────────────────────────────────
+# post_retries: retry attempts when posting to the Icinga API fails.
+# post_backoff: exponential backoff base in seconds (doubles each retry).
+# max_workers:  maximum concurrent goroutines for posting results.
+[reliability]
+post_retries = 3
+post_backoff = 1.0
+max_workers  = 40
